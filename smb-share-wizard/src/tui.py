@@ -720,37 +720,70 @@ class TUIWizard:
 
     def _users_groups_flow(self, stdscr):
         # Returns an action dict to apply outside curses (revoke_access /
-        # delete_user / delete_group), or None once the user backs all the
-        # way out.
+        # delete_user / delete_group / assign_group / revoke_group), or
+        # None once the user backs all the way out. Users and Groups are
+        # deliberately separate screens - easier to look at one without the
+        # other in the way, rather than one merged list.
         while True:
-            groups = self.wizard.list_groups()
+            choice = self._menu(stdscr, "Users & Groups", ["Users", "Groups", "Back"])
+            if choice is None or choice == 2:
+                return None
+            action = self._users_screen_flow(stdscr) if choice == 0 else self._groups_screen_flow(stdscr)
+            if action:
+                return action
+            # otherwise the user backed out of that screen - show the chooser again
+
+    def _users_screen_flow(self, stdscr):
+        while True:
             users = self.wizard.list_users()
-
-            entries = []
-            for u in users:
-                user_groups = ", ".join(u["groups"]) or "(none)"
-                entries.append((f"[user] {u['username']}  (groups: {user_groups})", ("user", u)))
-            for g in groups:
-                members = ", ".join(g["members"]) or "(none)"
-                entries.append((f"[group] {g['name']}  (members: {members})", ("group", g)))
-
-            if not entries:
-                self._message(stdscr, "No users or groups found.")
+            if not users:
+                self._message(stdscr, "No users found.")
                 return None
 
-            options = [label for label, _ in entries] + ["Back"]
-            idx = self._menu(stdscr, "Users & Groups", options, subtitle="Select an entry to manage")
+            body = []
+            for u in users:
+                body.append(u["username"])
+                for g in u["groups"]:
+                    body.append(f"    group: {g}")
+                for s in u["shares"]:
+                    body.append(f"    share: {s}")
+                body.append("")
+
+            options = [u["username"] for u in users] + ["Back"]
+            idx = self._menu(stdscr, "Users", options, subtitle="Select a user to manage", body=body)
             if idx is None or idx == len(options) - 1:
                 return None
 
-            kind, obj = entries[idx][1]
-            if kind == "user":
-                action = self._manage_user_flow(stdscr, obj)
-            else:
-                action = self._manage_group_flow(stdscr, obj)
+            action = self._manage_user_flow(stdscr, users[idx])
             if action:
                 return action
-            # otherwise the user backed out of that submenu - show the list again
+            # otherwise back out of the submenu - show this screen again
+
+    def _groups_screen_flow(self, stdscr):
+        while True:
+            groups = self.wizard.list_groups()
+            if not groups:
+                self._message(stdscr, "No managed groups found.")
+                return None
+
+            body = []
+            for g in groups:
+                body.append(g["name"])
+                for m in g["members"]:
+                    body.append(f"    user: {m}")
+                for s in g["shares"]:
+                    body.append(f"    share: {s}")
+                body.append("")
+
+            options = [g["name"] for g in groups] + ["Back"]
+            idx = self._menu(stdscr, "Groups", options, subtitle="Select a group to manage", body=body)
+            if idx is None or idx == len(options) - 1:
+                return None
+
+            action = self._manage_group_flow(stdscr, groups[idx])
+            if action:
+                return action
+            # otherwise back out of the submenu - show this screen again
 
     def _manage_user_flow(self, stdscr, user):
         sub_options = ["Assign to group"]
