@@ -1,0 +1,7 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Kelpie
+Source: local build
+
+Files: *
+Copyright: 2026 Caden Lister <cadenlister@gmail.com>
+License: MIT

@@ -1,0 +1,16 @@
+Package: kelpie
+Version: 0.1.0
+Section: admin
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.8), python3-rich, python3-tk
+Recommends: samba, policykit-1
+Maintainer: Caden Lister <cadenlister@gmail.com>
+Description: Kelpie - cross-platform SMB share configuration wizard
+ A graphical wizard (with a --cli fallback) for creating and managing
+ SMB (Samba) shares. Walks the user through share name, path, and
+ user credentials, then applies the configuration on Linux by
+ installing Samba if needed, writing the smb.conf share block,
+ creating the system user, and restarting the Samba services.
+ Requests root privileges via a native polkit (pkexec) prompt when
+ not already run as root, falling back to a terminal sudo prompt.

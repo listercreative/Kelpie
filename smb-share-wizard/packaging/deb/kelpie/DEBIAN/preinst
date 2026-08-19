@@ -1,0 +1,22 @@
+#!/bin/sh
+# Runs automatically as part of `apt install`/`dpkg -i`, before any package
+# files are unpacked. Shows Kelpie's own terminal UI to explain what's about
+# to happen and let the user back out - no separate script needed, since
+# this fires as an intrinsic part of installing the .deb.
+set -e
+
+if [ "$1" = "install" ] || [ "$1" = "upgrade" ]; then
+    if [ -t 0 ] && [ -t 1 ] && command -v python3 >/dev/null 2>&1; then
+        SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+        python3 "$SCRIPT_DIR/preview.py"
+        status=$?
+        if [ "$status" = 1 ]; then
+            echo "Cancelled. Nothing was installed." >&2
+            exit 1
+        fi
+        # status 2 = no usable terminal UI even though this is a tty
+        # (e.g. TERM=dumb) - fall through and let the install proceed.
+    fi
+fi
+
+exit 0
