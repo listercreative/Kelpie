@@ -560,6 +560,83 @@ class TUIWizard:
             elif key in (27, ord('q')):
                 return None
 
+    def _tree_menu(self, stdscr, title, items, subtitle=None):
+        # Like _menu, but each entry can carry its own non-selectable,
+        # indented context lines shown directly beneath it (e.g. a user's
+        # groups/shares) - only the top-level entries are navigable, so
+        # there's no separate options list duplicating the same names.
+        # items: list of (label, sublines). Esc/q cancels - no "Back" entry
+        # needed since that's exactly what Esc already does.
+        idx = 0
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        footer = "Up/Down: move  Enter: select  Esc/q: cancel"
+        while True:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+
+            width_lines = [title] + ([subtitle] if subtitle else [])
+            for label, sublines in items:
+                width_lines.append(label)
+                width_lines.extend(sublines)
+            content_width = min(max(len(l) for l in width_lines), w - 4)
+            col = max(2, (w - content_width) // 2)
+
+            content_rows = 1 + (1 if subtitle else 0) + 1
+            for label, sublines in items:
+                content_rows += 1 + len(sublines) + 1
+            row = max(0, (h - content_rows - 2) // 2)
+
+            try:
+                stdscr.addstr(row, col, title[:w - col - 2], curses.A_BOLD)
+            except curses.error:
+                pass
+            row += 1
+            if subtitle:
+                try:
+                    stdscr.addstr(row, col, subtitle[:w - col - 2])
+                except curses.error:
+                    pass
+                row += 1
+            row += 1
+
+            for i, (label, sublines) in enumerate(items):
+                if row >= h - 1:
+                    break
+                marker = ">" if i == idx else " "
+                attr = curses.A_REVERSE if i == idx else curses.A_NORMAL
+                try:
+                    stdscr.addstr(row, col, f"{marker} {label}"[:w - col - 2], attr)
+                except curses.error:
+                    pass
+                row += 1
+                for line in sublines:
+                    if row >= h - 1:
+                        break
+                    try:
+                        stdscr.addstr(row, col, ("    " + line)[:w - col - 2])
+                    except curses.error:
+                        pass
+                    row += 1
+                row += 1
+
+            try:
+                footer_col = max(0, (w - len(footer)) // 2)
+                stdscr.addstr(h - 1, footer_col, footer[:w - footer_col - 1], curses.A_DIM)
+            except curses.error:
+                pass
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key in (curses.KEY_UP, ord('k')):
+                idx = (idx - 1) % len(items)
+            elif key in (curses.KEY_DOWN, ord('j')):
+                idx = (idx + 1) % len(items)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return idx
+            elif key in (27, ord('q')):
+                return None
+
     def _text_input(self, stdscr, prompt, password=False):
         curses.curs_set(1)
         stdscr.keypad(True)
@@ -697,15 +774,15 @@ class TUIWizard:
         if not shares:
             self._message(stdscr, "No existing shares found.")
             return None
-        options = [f"{s['name']}  ({s.get('path', 'Unknown')})" for s in shares] + ["Back"]
+        options = [f"{s['name']}  ({s.get('path', 'Unknown')})" for s in shares]
         idx = self._menu(stdscr, "Manage Shares", options, subtitle="Select a share to manage")
-        if idx is None or idx == len(options) - 1:
+        if idx is None:
             return None
         share = shares[idx]
 
-        sub_options = ["Add user", "Delete share", "Back"]
+        sub_options = ["Add user", "Delete share"]
         sub_idx = self._menu(stdscr, share['name'], sub_options, subtitle=share.get('path', ''))
-        if sub_idx is None or sub_options[sub_idx] == "Back":
+        if sub_idx is None:
             return None
         if sub_options[sub_idx] == "Delete share":
             return {"action": "delete", "name": share['name']}
@@ -721,12 +798,13 @@ class TUIWizard:
     def _users_groups_flow(self, stdscr):
         # Returns an action dict to apply outside curses (revoke_access /
         # delete_user / delete_group / assign_group / revoke_group), or
-        # None once the user backs all the way out. Users and Groups are
+        # None once the user backs all the way out (Esc/q at any level -
+        # no separate "Back" entries needed). Users and Groups are
         # deliberately separate screens - easier to look at one without the
         # other in the way, rather than one merged list.
         while True:
-            choice = self._menu(stdscr, "Users & Groups", ["Users", "Groups", "Back"])
-            if choice is None or choice == 2:
+            choice = self._menu(stdscr, "Users & Groups", ["Users", "Groups"])
+            if choice is None:
                 return None
             action = self._users_screen_flow(stdscr) if choice == 0 else self._groups_screen_flow(stdscr)
             if action:
@@ -740,18 +818,12 @@ class TUIWizard:
                 self._message(stdscr, "No users found.")
                 return None
 
-            body = []
-            for u in users:
-                body.append(u["username"])
-                for g in u["groups"]:
-                    body.append(f"    group: {g}")
-                for s in u["shares"]:
-                    body.append(f"    share: {s}")
-                body.append("")
-
-            options = [u["username"] for u in users] + ["Back"]
-            idx = self._menu(stdscr, "Users", options, subtitle="Select a user to manage", body=body)
-            if idx is None or idx == len(options) - 1:
+            items = [
+                (u["username"], [f"group: {g}" for g in u["groups"]] + [f"share: {s}" for s in u["shares"]])
+                for u in users
+            ]
+            idx = self._tree_menu(stdscr, "Users", items, subtitle="Select a user to manage")
+            if idx is None:
                 return None
 
             action = self._manage_user_flow(stdscr, users[idx])
@@ -766,18 +838,12 @@ class TUIWizard:
                 self._message(stdscr, "No managed groups found.")
                 return None
 
-            body = []
-            for g in groups:
-                body.append(g["name"])
-                for m in g["members"]:
-                    body.append(f"    user: {m}")
-                for s in g["shares"]:
-                    body.append(f"    share: {s}")
-                body.append("")
-
-            options = [g["name"] for g in groups] + ["Back"]
-            idx = self._menu(stdscr, "Groups", options, subtitle="Select a group to manage", body=body)
-            if idx is None or idx == len(options) - 1:
+            items = [
+                (g["name"], [f"user: {m}" for m in g["members"]] + [f"share: {s}" for s in g["shares"]])
+                for g in groups
+            ]
+            idx = self._tree_menu(stdscr, "Groups", items, subtitle="Select a group to manage")
+            if idx is None:
                 return None
 
             action = self._manage_group_flow(stdscr, groups[idx])
@@ -791,12 +857,12 @@ class TUIWizard:
             sub_options.append("Remove from group")
         if user["shares"]:
             sub_options.append("Revoke share access")
-        sub_options += ["Delete user", "Back"]
+        sub_options.append("Delete user")
         sub_idx = self._menu(
             stdscr, user["username"], sub_options,
             subtitle=f"groups: {', '.join(user['groups']) or '(none)'}  shares: {', '.join(user['shares']) or '(none)'}"
         )
-        if sub_idx is None or sub_options[sub_idx] == "Back":
+        if sub_idx is None:
             return None
         choice = sub_options[sub_idx]
 
@@ -805,23 +871,21 @@ class TUIWizard:
             if not groups:
                 self._message(stdscr, "No groups exist to assign to.")
                 return None
-            group_options = [g["name"] for g in groups] + ["Back"]
+            group_options = [g["name"] for g in groups]
             gidx = self._menu(stdscr, "Assign to which group?", group_options)
-            if gidx is None or group_options[gidx] == "Back":
+            if gidx is None:
                 return None
             return {"action": "assign_group", "username": user["username"], "group": group_options[gidx]}
 
         if choice == "Remove from group":
-            group_options = user["groups"] + ["Back"]
-            gidx = self._menu(stdscr, "Remove from which group?", group_options)
-            if gidx is None or group_options[gidx] == "Back":
+            gidx = self._menu(stdscr, "Remove from which group?", user["groups"])
+            if gidx is None:
                 return None
-            return {"action": "revoke_group", "username": user["username"], "group": group_options[gidx]}
+            return {"action": "revoke_group", "username": user["username"], "group": user["groups"][gidx]}
 
         if choice == "Revoke share access":
-            share_options = user["shares"] + ["Back"]
-            sidx = self._menu(stdscr, "Revoke access to which share?", share_options)
-            if sidx is None or share_options[sidx] == "Back":
+            sidx = self._menu(stdscr, "Revoke access to which share?", user["shares"])
+            if sidx is None:
                 return None
             return {"action": "revoke_access", "share": user["shares"][sidx], "username": user["username"]}
 
@@ -834,12 +898,12 @@ class TUIWizard:
         sub_options = ["Add member"]
         if group["members"]:
             sub_options.append("Remove member")
-        sub_options += ["Delete group", "Back"]
+        sub_options.append("Delete group")
         sub_idx = self._menu(
             stdscr, group["name"], sub_options,
             subtitle=f"members: {', '.join(group['members']) or '(none)'}  shares: {', '.join(group['shares']) or '(none)'}"
         )
-        if sub_idx is None or sub_options[sub_idx] == "Back":
+        if sub_idx is None:
             return None
         choice = sub_options[sub_idx]
 
@@ -850,9 +914,8 @@ class TUIWizard:
             return {"action": "assign_group", "username": username, "group": group["name"]}
 
         if choice == "Remove member":
-            member_options = group["members"] + ["Back"]
-            midx = self._menu(stdscr, "Remove which member?", member_options)
-            if midx is None or member_options[midx] == "Back":
+            midx = self._menu(stdscr, "Remove which member?", group["members"])
+            if midx is None:
                 return None
             return {"action": "revoke_group", "username": group["members"][midx], "group": group["name"]}
 
