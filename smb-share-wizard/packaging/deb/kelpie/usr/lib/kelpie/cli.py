@@ -17,7 +17,7 @@ class CLIWizard(SMBWizard):
             console.print("[red]Error: Name cannot be empty.[/red]")
             return False
 
-        default_path = self.default_share_path()
+        default_path = self.default_share_path(self.share_name)
         console.print(f"[bold]2. Enter path (default: {default_path}) or use [D] for directory picker:[/bold]")
         path_input = console.input("[cyan]> [/cyan]").strip()
 

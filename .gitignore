@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# Built installer artifacts - regenerate with packaging/*/build.sh or build.ps1
+smb-share-wizard/packaging/deb/kelpie_0.1.0_all.deb
+smb-share-wizard/packaging/windows/*.exe
+smb-share-wizard/packaging/windows/*.msi

@@ -90,11 +90,13 @@ class GUIWizard:
         ttk.Label(form, text="Share Name:").grid(row=0, column=0, sticky="e", pady=4)
         self.name_entry = ttk.Entry(form, width=40)
         self.name_entry.grid(row=0, column=1, columnspan=2, sticky="w", pady=4)
+        self.name_entry.bind("<KeyRelease>", self._on_name_changed)
 
         ttk.Label(form, text="Folder Path:").grid(row=1, column=0, sticky="e", pady=4)
         self.path_entry = ttk.Entry(form, width=32)
         self.path_entry.grid(row=1, column=1, sticky="w", pady=4)
-        self.path_entry.insert(0, self.wizard.default_share_path())
+        self._last_suggested_path = self.wizard.default_share_path()
+        self.path_entry.insert(0, self._last_suggested_path)
         ttk.Button(form, text="Browse...", command=self._browse_path).grid(row=1, column=2, padx=4)
 
         users_label_frame = ttk.LabelFrame(frame, text="Users")
@@ -138,6 +140,17 @@ class GUIWizard:
         if selected:
             self.path_entry.delete(0, tk.END)
             self.path_entry.insert(0, selected)
+
+    def _on_name_changed(self, event=None):
+        # Keep the suggested path in sync with the share name, but only
+        # while the user hasn't typed/browsed a path of their own.
+        if self.path_entry.get() != self._last_suggested_path:
+            return
+        name = self.name_entry.get().strip()
+        suggested = self.wizard.default_share_path(name) if name else self.wizard.default_share_path()
+        self.path_entry.delete(0, tk.END)
+        self.path_entry.insert(0, suggested)
+        self._last_suggested_path = suggested
 
     def _add_user(self):
         dialog = AddUserDialog(self.root)
@@ -204,7 +217,8 @@ class GUIWizard:
 
         self.name_entry.delete(0, tk.END)
         self.path_entry.delete(0, tk.END)
-        self.path_entry.insert(0, self.wizard.default_share_path())
+        self._last_suggested_path = self.wizard.default_share_path()
+        self.path_entry.insert(0, self._last_suggested_path)
         self.pending_users = []
         for item in self.users_list.get_children():
             self.users_list.delete(item)

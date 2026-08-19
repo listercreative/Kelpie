@@ -343,7 +343,7 @@ class TUIWizard:
         if not name:
             return None
 
-        default_path = self.wizard.default_share_path()
+        default_path = self.wizard.default_share_path(name)
         choice = self._menu(stdscr, "2. Share path", [
             f"Use default: {default_path}",
             "Browse for a folder (cursor keys)",
