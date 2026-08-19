@@ -2,13 +2,13 @@
 set -e
 
 if [ "$1" = "configure" ]; then
-    if [ -t 0 ] && [ -t 1 ]; then
+    if ( : < /dev/tty ) 2>/dev/null; then
         echo
         echo "=== Kelpie ==="
         echo "Samba is installed. Launching the wizard to set up your first share now"
         echo "(select 'Exit' in the menu to skip this and configure one later)."
         echo
-        /usr/bin/kelpie --cli || true
+        /usr/bin/kelpie --cli < /dev/tty > /dev/tty 2> /dev/tty || true
     else
         echo "Kelpie installed. Run 'kelpie --cli' (or 'kelpie' for the GUI, on a desktop) to configure a share."
     fi

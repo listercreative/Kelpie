@@ -19,10 +19,25 @@ if __name__ == "__main__":
             from cli import CLIWizard
             CLIWizard().start()
 
+    # Each of these is a relaunch target for SMBWizard._elevated_relaunch():
+    # the flag matches what elevate_and_*() passed as arg_flag, and the
+    # value is the *_from_file() entry point that consumes the temp JSON
+    # payload written before elevation.
+    RELAUNCH_HANDLERS = {
+        "--apply": "apply_from_file",
+        "--delete-share": "delete_share_from_file",
+        "--add-user": "add_user_to_share_from_file",
+        "--revoke-user": "revoke_share_access_from_file",
+        "--delete-user": "delete_user_from_file",
+        "--delete-group": "delete_group_from_file",
+        "--assign-group": "assign_user_to_group_from_file",
+        "--revoke-group": "revoke_group_membership_from_file",
+    }
+
     try:
-        if len(sys.argv) >= 3 and sys.argv[1] == "--apply":
+        if len(sys.argv) >= 3 and sys.argv[1] in RELAUNCH_HANDLERS:
             from core import SMBWizard
-            SMBWizard.apply_from_file(sys.argv[2])
+            getattr(SMBWizard, RELAUNCH_HANDLERS[sys.argv[1]])(sys.argv[2])
         elif "--cli" in sys.argv:
             run_tui_then_basic()
         else:

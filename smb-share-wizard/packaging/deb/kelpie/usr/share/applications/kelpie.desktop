@@ -2,7 +2,8 @@
 Name=Kelpie
 Comment=Create and manage SMB (Samba) shares
 Exec=kelpie
-Icon=folder-publicshare
+Icon=kelpie
+StartupWMClass=Kelpie
 Terminal=false
 Type=Application
 Categories=System;Settings;

@@ -12,6 +12,9 @@
 
     <MediaTemplate EmbedCab="yes" />
 
+    <Icon Id="KelpieIcon" SourceFile="kelpie_icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="KelpieIcon" />
+
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Kelpie">
         <Component Id="MainExecutable" Guid="6e1e9f53-8c4b-4e01-9c39-4d5e12a9b701">
@@ -26,7 +29,8 @@
           <Shortcut Id="AppStartMenuShortcut"
                     Name="Kelpie"
                     Target="[INSTALLFOLDER]Kelpie.exe"
-                    WorkingDirectory="INSTALLFOLDER" />
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="KelpieIcon" />
           <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
           <RegistryValue Root="HKCU"
                           Key="Software\Kelpie"

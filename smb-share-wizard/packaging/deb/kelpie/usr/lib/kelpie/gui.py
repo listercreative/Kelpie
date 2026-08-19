@@ -1,5 +1,6 @@
 import contextlib
 import io
+import os
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -56,30 +57,131 @@ class AddUserDialog(tk.Toplevel):
         self.destroy()
 
 
+class ChoiceDialog(tk.Toplevel):
+    """Generic pick-one-from-a-list dialog, reused for revoke share access,
+    assign to group, and remove from group."""
+    def __init__(self, parent, title, prompt, choices, ok_label="OK"):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result = None
+
+        ttk.Label(self, text=prompt).grid(row=0, column=0, columnspan=2, padx=8, pady=6)
+        self.choice_var = tk.StringVar(value=choices[0])
+        combo = ttk.Combobox(self, textvariable=self.choice_var, values=choices, state="readonly")
+        combo.grid(row=1, column=0, columnspan=2, padx=8, pady=6)
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text=ok_label, command=self._on_ok).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=4)
+
+        self.grab_set()
+        self.wait_window(self)
+
+    def _on_ok(self):
+        self.result = self.choice_var.get()
+        self.destroy()
+
+
+class TextInputDialog(tk.Toplevel):
+    """Generic single-field text prompt, used for adding a group member by
+    username (no password - that's AddUserDialog's job when creating a new
+    Samba user; this is for assigning an already-existing user)."""
+    def __init__(self, parent, title, prompt):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result = None
+
+        ttk.Label(self, text=prompt).grid(row=0, column=0, columnspan=2, padx=8, pady=6)
+        self.entry = ttk.Entry(self)
+        self.entry.grid(row=1, column=0, columnspan=2, padx=8, pady=6)
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="OK", command=self._on_ok).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=4)
+
+        self.entry.focus_set()
+        self.grab_set()
+        self.wait_window(self)
+
+    def _on_ok(self):
+        value = self.entry.get().strip()
+        if not value:
+            messagebox.showerror("Invalid input", "This field cannot be empty.", parent=self)
+            return
+        self.result = value
+        self.destroy()
+
+
 class GUIWizard:
     def __init__(self):
         self.wizard = SMBWizard()
         self.pending_users = []
 
-        self.root = tk.Tk()
+        # className sets WM_CLASS, which is what taskbars/docks/app-switchers
+        # use to match this running window back to kelpie.desktop (and thus
+        # its Icon=) - without it Tk defaults to the generic class "Tk" and
+        # the tray/taskbar icon can end up generic even though the titlebar
+        # icon (set below) looks right.
+        self.root = tk.Tk(className="Kelpie")
         self.root.title("Kelpie")
         self.root.geometry("560x600")
+        self._load_icon_image()
+        self._set_window_icon()
+        self._build_header()
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.create_tab = ttk.Frame(notebook)
         self.manage_tab = ttk.Frame(notebook)
+        self.users_groups_tab = ttk.Frame(notebook)
         notebook.add(self.create_tab, text="Create Share")
         notebook.add(self.manage_tab, text="Manage Shares")
-        notebook.bind("<<NotebookTabChanged>>", lambda e: self._refresh_manage_list())
+        notebook.add(self.users_groups_tab, text="Users & Groups")
+        notebook.bind("<<NotebookTabChanged>>", lambda e: self._refresh_all_lists())
 
         self._build_create_tab()
         self._build_manage_tab()
-        self._refresh_manage_list()
+        self._build_users_groups_tab()
+        self._refresh_all_lists()
 
     def run(self):
         self.root.mainloop()
+
+    def _load_icon_image(self):
+        # Ships right next to this file both in the source tree and in the
+        # installed package (see build.sh), so this resolves either way.
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kelpie_icon.png")
+        try:
+            self._icon_image = tk.PhotoImage(file=icon_path)
+        except tk.TclError:
+            self._icon_image = None
+
+    def _set_window_icon(self):
+        if self._icon_image:
+            self.root.iconphoto(True, self._icon_image)
+
+    def _build_header(self):
+        # The real logo, front and center - not the TUI's ASCII rendition -
+        # so the app's branding is obvious the moment the window opens, not
+        # just in the titlebar/taskbar.
+        header = ttk.Frame(self.root)
+        header.pack(fill="x", padx=12, pady=(12, 0))
+
+        if self._icon_image:
+            scale = max(1, self._icon_image.width() // 56)
+            self._header_icon_image = self._icon_image.subsample(scale, scale)
+            ttk.Label(header, image=self._header_icon_image).pack(side="left", padx=(0, 10))
+
+        ttk.Label(header, text="Kelpie", font=("TkDefaultFont", 18, "bold")).pack(side="left")
+
+        ttk.Separator(self.root, orient="horizontal").pack(fill="x", padx=8, pady=(10, 0))
 
     def _build_create_tab(self):
         frame = self.create_tab
@@ -106,6 +208,10 @@ class GUIWizard:
         self.users_list.heading("username", text="Username")
         self.users_list.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
 
+        users_list_scroll = ttk.Scrollbar(users_label_frame, orient="vertical", command=self.users_list.yview)
+        self.users_list.configure(yscrollcommand=users_list_scroll.set)
+        users_list_scroll.pack(side="left", fill="y", pady=4)
+
         users_btn_frame = ttk.Frame(users_label_frame)
         users_btn_frame.pack(side="left", fill="y", padx=4, pady=4)
         ttk.Button(users_btn_frame, text="Add User...", command=self._add_user).pack(fill="x", pady=2)
@@ -125,15 +231,114 @@ class GUIWizard:
     def _build_manage_tab(self):
         frame = self.manage_tab
 
-        self.shares_list = ttk.Treeview(frame, columns=("name", "path"), show="headings")
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.shares_list = ttk.Treeview(tree_frame, columns=("name", "path"), show="headings")
         self.shares_list.heading("name", text="Share Name")
         self.shares_list.heading("path", text="Path")
-        self.shares_list.pack(fill="both", expand=True, padx=8, pady=8)
+        self.shares_list.pack(side="left", fill="both", expand=True)
+
+        shares_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.shares_list.yview)
+        self.shares_list.configure(yscrollcommand=shares_scroll.set)
+        shares_scroll.pack(side="right", fill="y")
 
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(btn_frame, text="Refresh", command=self._refresh_manage_list).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Add User...", command=self._add_user_to_selected_share).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Delete Selected", command=self._delete_selected_share).pack(side="left", padx=4)
+
+    def _build_users_groups_tab(self):
+        frame = self.users_groups_tab
+
+        # Both trees are hierarchical: a top-level row per group/user, with
+        # its members/shares (or groups/shares) nested as child rows -
+        # "show='tree'" uses just the indent/expand column, since the
+        # hierarchy itself conveys the relationship.
+        groups_frame = ttk.LabelFrame(frame, text="Groups")
+        groups_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        self.groups_list = ttk.Treeview(groups_frame, show="tree", height=6)
+        self.groups_list.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
+
+        groups_scroll = ttk.Scrollbar(groups_frame, orient="vertical", command=self.groups_list.yview)
+        self.groups_list.configure(yscrollcommand=groups_scroll.set)
+        groups_scroll.pack(side="right", fill="y", pady=4)
+
+        groups_btn_frame = ttk.Frame(frame)
+        groups_btn_frame.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(groups_btn_frame, text="Add Member...", command=self._add_group_member).pack(
+            side="left", padx=4
+        )
+        ttk.Button(groups_btn_frame, text="Remove Member...", command=self._remove_group_member).pack(
+            side="left", padx=4
+        )
+        ttk.Button(groups_btn_frame, text="Delete Group", command=self._delete_selected_group).pack(
+            side="left", padx=4
+        )
+
+        users_frame = ttk.LabelFrame(frame, text="Users")
+        users_frame.pack(fill="both", expand=True, padx=8, pady=(4, 4))
+        self.system_users_list = ttk.Treeview(users_frame, show="tree", height=6)
+        self.system_users_list.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
+
+        system_users_scroll = ttk.Scrollbar(users_frame, orient="vertical", command=self.system_users_list.yview)
+        self.system_users_list.configure(yscrollcommand=system_users_scroll.set)
+        system_users_scroll.pack(side="right", fill="y", pady=4)
+
+        users_btn_frame = ttk.Frame(frame)
+        users_btn_frame.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(users_btn_frame, text="Assign to Group...", command=self._assign_selected_user_to_group).pack(
+            side="left", padx=4
+        )
+        ttk.Button(
+            users_btn_frame, text="Remove from Group...", command=self._remove_selected_user_from_group
+        ).pack(side="left", padx=4)
+        ttk.Button(users_btn_frame, text="Revoke Access...", command=self._revoke_selected_user_access).pack(
+            side="left", padx=4
+        )
+        ttk.Button(users_btn_frame, text="Delete User", command=self._delete_selected_user).pack(
+            side="left", padx=4
+        )
+
+        ttk.Button(frame, text="Refresh", command=self._refresh_users_groups).pack(
+            padx=8, pady=(0, 8), anchor="w"
+        )
+
+    def _refresh_users_groups(self):
+        for item in self.groups_list.get_children():
+            self.groups_list.delete(item)
+        for g in self.wizard.list_groups():
+            gid = self.groups_list.insert("", tk.END, text=g["name"], open=True)
+            for m in g["members"]:
+                self.groups_list.insert(gid, tk.END, text=f"user: {m}")
+            for s in g["shares"]:
+                self.groups_list.insert(gid, tk.END, text=f"share: {s}")
+
+        for item in self.system_users_list.get_children():
+            self.system_users_list.delete(item)
+        for u in self.wizard.list_users():
+            uid = self.system_users_list.insert("", tk.END, text=u["username"], open=True)
+            for g in u["groups"]:
+                self.system_users_list.insert(uid, tk.END, text=f"group: {g}")
+            for s in u["shares"]:
+                self.system_users_list.insert(uid, tk.END, text=f"share: {s}")
+
+    def _refresh_all_lists(self):
+        self._refresh_manage_list()
+        self._refresh_users_groups()
+
+    def _selected_top_level_text(self, tree):
+        # Action buttons work whether you selected the top-level row
+        # (group/user) or one of its nested children - walk up to the
+        # top-level ancestor and return its label either way.
+        selection = tree.selection()
+        if not selection:
+            return None
+        item = selection[0]
+        while tree.parent(item):
+            item = tree.parent(item)
+        return tree.item(item, "text")
 
     def _browse_path(self):
         selected = filedialog.askdirectory(parent=self.root, title="Select Folder to Share")
@@ -168,18 +373,275 @@ class GUIWizard:
     def _refresh_manage_list(self):
         for item in self.shares_list.get_children():
             self.shares_list.delete(item)
-        for share in self.wizard.load_config():
+        for share in self.wizard.list_shares():
             self.shares_list.insert("", tk.END, values=(share.get("name", "?"), share.get("path", "Unknown")))
+
+    def _add_user_to_selected_share(self):
+        selection = self.shares_list.selection()
+        if not selection:
+            messagebox.showinfo("Add user", "Select a share first.")
+            return
+        share_name = self.shares_list.item(selection[0], "values")[0]
+        dialog = AddUserDialog(self.root)
+        if not dialog.result:
+            return
+        username = dialog.result["username"]
+        password = dialog.result["password"]
+        threading.Thread(
+            target=self._grant_access_worker, args=(share_name, username, password), daemon=True
+        ).start()
+
+    def _grant_access_worker(self, share_name, username, password):
+        buffer = io.StringIO()
+        added = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                added = self.wizard.grant_share_access(share_name, username, password)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._grant_access_done(share_name, username, added, buffer.getvalue()))
+
+    def _grant_access_done(self, share_name, username, added, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        if added:
+            messagebox.showinfo("Added", f"Added '{username}' to share '{share_name}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not add '{username}' to share '{share_name}' — see log.")
+        self._refresh_all_lists()
+
+    def _assign_selected_user_to_group(self):
+        username = self._selected_top_level_text(self.system_users_list)
+        if not username:
+            messagebox.showinfo("Assign to group", "Select a user first.")
+            return
+        groups = self.wizard.list_groups()
+        if not groups:
+            messagebox.showinfo("Assign to group", "No groups exist to assign to.")
+            return
+        dialog = ChoiceDialog(
+            self.root, "Assign to Group", f"Assign '{username}' to:",
+            [g["name"] for g in groups], ok_label="Assign"
+        )
+        if not dialog.result:
+            return
+        threading.Thread(
+            target=self._assign_group_worker, args=(username, dialog.result), daemon=True
+        ).start()
+
+    def _assign_group_worker(self, username, group_name):
+        buffer = io.StringIO()
+        ok = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                ok = self.wizard.assign_user_to_group(username, group_name)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._assign_group_done(username, group_name, ok, buffer.getvalue()))
+
+    def _assign_group_done(self, username, group_name, ok, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        if ok:
+            messagebox.showinfo("Added", f"Added '{username}' to group '{group_name}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not add '{username}' to group '{group_name}' — see log.")
+        self._refresh_all_lists()
+
+    def _remove_selected_user_from_group(self):
+        username = self._selected_top_level_text(self.system_users_list)
+        if not username:
+            messagebox.showinfo("Remove from group", "Select a user first.")
+            return
+        user = next((u for u in self.wizard.list_users() if u["username"] == username), None)
+        if not user or not user["groups"]:
+            messagebox.showinfo("Remove from group", f"'{username}' isn't in any group.")
+            return
+        dialog = ChoiceDialog(
+            self.root, "Remove from Group", f"Remove '{username}' from:",
+            user["groups"], ok_label="Remove"
+        )
+        if not dialog.result:
+            return
+        threading.Thread(
+            target=self._revoke_group_worker, args=(username, dialog.result), daemon=True
+        ).start()
+
+    def _add_group_member(self):
+        group_name = self._selected_top_level_text(self.groups_list)
+        if not group_name:
+            messagebox.showinfo("Add member", "Select a group first.")
+            return
+        dialog = TextInputDialog(self.root, "Add Member", f"Username to add to '{group_name}':")
+        if not dialog.result:
+            return
+        threading.Thread(
+            target=self._assign_group_worker, args=(dialog.result, group_name), daemon=True
+        ).start()
+
+    def _remove_group_member(self):
+        group_name = self._selected_top_level_text(self.groups_list)
+        if not group_name:
+            messagebox.showinfo("Remove member", "Select a group first.")
+            return
+        group = next((g for g in self.wizard.list_groups() if g["name"] == group_name), None)
+        if not group or not group["members"]:
+            messagebox.showinfo("Remove member", f"'{group_name}' has no members.")
+            return
+        dialog = ChoiceDialog(
+            self.root, "Remove Member", f"Remove which member of '{group_name}'?",
+            group["members"], ok_label="Remove"
+        )
+        if not dialog.result:
+            return
+        threading.Thread(
+            target=self._revoke_group_worker, args=(dialog.result, group_name), daemon=True
+        ).start()
+
+    def _revoke_group_worker(self, username, group_name):
+        buffer = io.StringIO()
+        ok = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                ok = self.wizard.revoke_group_membership(username, group_name)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._revoke_group_done(username, group_name, ok, buffer.getvalue()))
+
+    def _revoke_group_done(self, username, group_name, ok, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        if ok:
+            messagebox.showinfo("Removed", f"Removed '{username}' from group '{group_name}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not remove '{username}' from group '{group_name}' — see log.")
+        self._refresh_all_lists()
+
+    def _revoke_selected_user_access(self):
+        username = self._selected_top_level_text(self.system_users_list)
+        if not username:
+            messagebox.showinfo("Revoke access", "Select a user first.")
+            return
+        user = next((u for u in self.wizard.list_users() if u["username"] == username), None)
+        if not user or not user["shares"]:
+            messagebox.showinfo("Revoke access", f"'{username}' has no share access to revoke.")
+            return
+        dialog = ChoiceDialog(
+            self.root, "Revoke Access", f"Revoke '{username}' access to:", user["shares"], ok_label="Revoke"
+        )
+        if not dialog.result:
+            return
+        share_name = dialog.result
+        threading.Thread(
+            target=self._revoke_access_worker, args=(share_name, username), daemon=True
+        ).start()
+
+    def _revoke_access_worker(self, share_name, username):
+        buffer = io.StringIO()
+        revoked = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                revoked = self.wizard.revoke_share_access(share_name, username)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._revoke_access_done(share_name, username, revoked, buffer.getvalue()))
+
+    def _revoke_access_done(self, share_name, username, revoked, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        if revoked:
+            messagebox.showinfo("Revoked", f"Revoked '{username}''s access to '{share_name}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not revoke access — see log.")
+        self._refresh_all_lists()
+
+    def _delete_selected_user(self):
+        username = self._selected_top_level_text(self.system_users_list)
+        if not username:
+            messagebox.showinfo("Delete user", "Select a user first.")
+            return
+        if not messagebox.askyesno(
+            "Delete user", f"Delete user '{username}' entirely? This removes their account everywhere, not just one share."
+        ):
+            return
+        threading.Thread(target=self._delete_user_worker, args=(username,), daemon=True).start()
+
+    def _delete_user_worker(self, username):
+        buffer = io.StringIO()
+        deleted = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                deleted = self.wizard.remove_user(username)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._delete_user_done(username, deleted, buffer.getvalue()))
+
+    def _delete_user_done(self, username, deleted, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        if deleted:
+            messagebox.showinfo("Deleted", f"Deleted user '{username}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not delete user '{username}' — see log.")
+        self._refresh_all_lists()
+
+    def _delete_selected_group(self):
+        group_name = self._selected_top_level_text(self.groups_list)
+        if not group_name:
+            messagebox.showinfo("Delete group", "Select a group first.")
+            return
+        if not messagebox.askyesno("Delete group", f"Delete group '{group_name}'?"):
+            return
+        threading.Thread(target=self._delete_group_worker, args=(group_name,), daemon=True).start()
+
+    def _delete_group_worker(self, group_name):
+        buffer = io.StringIO()
+        deleted = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                deleted = self.wizard.remove_group(group_name)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._delete_group_done(group_name, deleted, buffer.getvalue()))
+
+    def _delete_group_done(self, group_name, deleted, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        if deleted:
+            messagebox.showinfo("Deleted", f"Deleted group '{group_name}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not delete group '{group_name}' — see log.")
+        self._refresh_all_lists()
 
     def _delete_selected_share(self):
         selection = self.shares_list.selection()
         if not selection:
             return
-        index = self.shares_list.index(selection[0])
-        removed = self.wizard.delete_share(index)
+        name = self.shares_list.item(selection[0], "values")[0]
+        if not messagebox.askyesno(
+            "Remove share", f"Remove share '{name}'? This updates the live Samba configuration."
+        ):
+            return
+        threading.Thread(target=self._delete_worker, args=(name,), daemon=True).start()
+
+    def _delete_worker(self, name):
+        buffer = io.StringIO()
+        removed = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                removed = self.wizard.remove_share(name)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._delete_done(name, removed, buffer.getvalue()))
+
+    def _delete_done(self, name, removed, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
         if removed:
-            messagebox.showinfo("Removed", f"Removed share: {removed['name']}")
-        self._refresh_manage_list()
+            messagebox.showinfo("Removed", f"Removed share: {name}")
+        else:
+            messagebox.showerror("Failed", f"Could not remove share '{name}' — see log.")
+        self._refresh_all_lists()
 
     def _append_log(self, text):
         self.log_text.configure(state="normal")
@@ -201,13 +663,6 @@ class GUIWizard:
         self.wizard.share_name = name
         self.wizard.share_path = path
         self.wizard.users = list(self.pending_users)
-
-        self.wizard.save_config({
-            "name": name,
-            "path": path,
-            "users": [{"username": u["username"]} for u in self.wizard.users]
-        })
-        self._refresh_manage_list()
 
         self.create_button.configure(state="disabled")
         self.status_label.configure(text="Working...")
@@ -245,6 +700,7 @@ class GUIWizard:
         self._append_log(log_output)
         self.create_button.configure(state="normal")
         self.status_label.configure(text="Idle")
+        self._refresh_all_lists()
         messagebox.showinfo("Done", "Configuration attempt finished — see the log for details.")
 
 

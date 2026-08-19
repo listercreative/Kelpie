@@ -5,6 +5,21 @@ a user only needs these three files, not the whole source tree."""
 import curses
 import sys
 
+# Big block-letter "KELPIE" wordmark shown above the horse banner - width
+# matched to the logo (65 vs 63 columns) so they read as one unit. Keep in
+# sync with src/tui.py's copy (this file is intentionally self-contained,
+# see the module docstring).
+KELPIE_TITLE = [
+    '88      a8P  88888888888 88          88888888ba  88 88888888888  ',
+    '88    ,88\'   88          88          88      "8b 88 88           ',
+    '88  ,88"     88          88          88      ,8P 88 88           ',
+    "88,d88'      88aaaaa     88          88aaaaaa8P' 88 88aaaaa      ",
+    '8888"88,     88"""""     88          88""""""\'   88 88"""""      ',
+    '88P   Y8b    88          88          88          88 88           ',
+    '88     "88,  88          88          88          88 88           ',
+    '88       Y8b 88888888888 88888888888 88          88 88888888888  ',
+]
+
 KELPIE_LOGO = [
     '                                                 -# :.',
     '                                           .:..:*@@=#',
@@ -124,6 +139,8 @@ def main(stdscr):
     stdscr.keypad(True)
     color_ok, color_mode, pair_256 = init_colors()
 
+    title = "Kelpie needs to install a few things"
+    footer = "Up/Down: move  Enter: select  Esc/q: cancel"
     options = ["Continue with install", "Cancel"]
     idx = 0
     while True:
@@ -131,25 +148,53 @@ def main(stdscr):
         h, w = stdscr.getmaxyx()
 
         show_banner = bool(
-            h >= len(KELPIE_LOGO) + len(options) + len(EXPLANATION) + 6
+            h >= len(KELPIE_TITLE) + 1 + len(KELPIE_LOGO) + len(options) + len(EXPLANATION) + 6
             and w >= max(len(l) for l in KELPIE_LOGO) + 4
         )
 
-        row = 0
+        # Block-center the whole thing: one shared left margin (col) so the
+        # banner/text keep their internal alignment, and the block as a
+        # whole sits centered both horizontally and vertically instead of
+        # pinned to the top-left corner.
+        content_width = max(
+            [len(title)]
+            + ([max(len(l) for l in KELPIE_TITLE + KELPIE_LOGO)] if show_banner else [])
+            + [len(l) for l in EXPLANATION]
+            + [len(opt) + 2 for opt in options]
+        )
+        content_width = min(content_width, w - 4)
+        col = max(2, (w - content_width) // 2)
+
+        content_rows = (
+            ((len(KELPIE_TITLE) + 1 + len(KELPIE_LOGO) + 1) if show_banner else 0)
+            + 2  # title
+            + len(EXPLANATION) + 1
+            + len(options)
+        )
+        row = max(0, (h - content_rows - 2) // 2)
+
         if show_banner:
+            for line in KELPIE_TITLE:
+                try:
+                    stdscr.addstr(row, col, line[:w - col - 2], curses.A_BOLD)
+                except curses.error:
+                    pass
+                row += 1
+            row += 1
+
             for li, line in enumerate(KELPIE_LOGO):
                 c8 = KELPIE_LOGO_COLORS_8[li]
                 c256 = KELPIE_LOGO_COLORS_256[li]
-                for ci, ch in enumerate(line[:w - 4]):
+                for ci, ch in enumerate(line[:w - col - 2]):
                     try:
-                        stdscr.addch(row, 2 + ci, ch, banner_attr(color_ok, color_mode, pair_256, c8[ci], c256[ci]))
+                        stdscr.addch(row, col + ci, ch, banner_attr(color_ok, color_mode, pair_256, c8[ci], c256[ci]))
                     except curses.error:
                         pass
                 row += 1
             row += 1
 
         try:
-            stdscr.addstr(row, 2, "Kelpie needs to install a few things"[:w - 4], curses.A_BOLD)
+            stdscr.addstr(row, col, title[:w - col - 2], curses.A_BOLD)
         except curses.error:
             pass
         row += 2
@@ -158,7 +203,7 @@ def main(stdscr):
             if row >= h - len(options) - 3:
                 break
             try:
-                stdscr.addstr(row, 2, line[:w - 4])
+                stdscr.addstr(row, col, line[:w - col - 2])
             except curses.error:
                 pass
             row += 1
@@ -171,11 +216,12 @@ def main(stdscr):
             marker = ">" if i == idx else " "
             attr = curses.A_REVERSE if i == idx else curses.A_NORMAL
             try:
-                stdscr.addstr(opt_row, 2, f"{marker} {opt}"[:w - 4], attr)
+                stdscr.addstr(opt_row, col, f"{marker} {opt}"[:w - col - 2], attr)
             except curses.error:
                 pass
         try:
-            stdscr.addstr(h - 1, 2, "Up/Down: move  Enter: select  Esc/q: cancel"[:w - 4], curses.A_DIM)
+            footer_col = max(0, (w - len(footer)) // 2)
+            stdscr.addstr(h - 1, footer_col, footer[:w - footer_col - 1], curses.A_DIM)
         except curses.error:
             pass
         stdscr.refresh()
