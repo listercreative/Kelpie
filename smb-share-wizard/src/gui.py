@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 
-from core import SMBWizard
+from core import SMBWizard, QR_PASSWORD_RESET_NOTE
 
 
 def _center_over_parent(win, parent):
@@ -286,7 +286,7 @@ class GUIWizard:
         btn_frame.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(btn_frame, text="Refresh", command=self._refresh_manage_list).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Add User...", command=self._add_user_to_selected_share).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Show QR Code...", command=self._show_qr_for_selected_share).pack(
+        ttk.Button(btn_frame, text="Reset Password & Show QR...", command=self._show_qr_for_selected_share).pack(
             side="left", padx=4
         )
         ttk.Button(btn_frame, text="Delete Selected", command=self._delete_selected_share).pack(side="left", padx=4)
@@ -330,6 +330,7 @@ class GUIWizard:
 
         users_btn_frame = ttk.Frame(frame)
         users_btn_frame.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(users_btn_frame, text="New User...", command=self._create_new_user).pack(side="left", padx=4)
         ttk.Button(users_btn_frame, text="Assign to Group...", command=self._assign_selected_user_to_group).pack(
             side="left", padx=4
         )
@@ -470,20 +471,23 @@ class GUIWizard:
         # user already on the share instead of a fresh one.
         selection = self.shares_list.selection()
         if not selection:
-            messagebox.showinfo("Show QR code", "Select a share first.")
+            messagebox.showinfo("Reset Password & Show QR", "Select a share first.")
             return
         share_name = self.shares_list.item(selection[0], "values")[0]
         share = next((s for s in self.wizard.list_shares() if s["name"] == share_name), None)
         users = share.get("users", []) if share else []
         if not users:
-            messagebox.showinfo("Show QR code", f"'{share_name}' has no users yet — add one first.")
+            messagebox.showinfo("Reset Password & Show QR", f"'{share_name}' has no users yet — add one first.")
+            return
+
+        if not messagebox.askokcancel("Reset Password & Show QR", QR_PASSWORD_RESET_NOTE):
             return
 
         if len(users) == 1:
             username = users[0]["username"]
         else:
             dialog = ChoiceDialog(
-                self.root, "Choose user", "Generate a new QR code for which user?",
+                self.root, "Choose user", "Reset password & show QR code for which user?",
                 [u["username"] for u in users], ok_label="Next"
             )
             if not dialog.result:
@@ -708,6 +712,38 @@ class GUIWizard:
             messagebox.showinfo("Deleted", f"Deleted user '{username}'.")
         else:
             messagebox.showerror("Failed", f"Could not delete user '{username}' — see log.")
+        self._refresh_all_lists()
+
+    def _create_new_user(self):
+        # A standalone account, not attached to any share or group - lets a
+        # user get set up ahead of deciding what to grant them access to,
+        # instead of forcing a throwaway share into existence just to get
+        # the account created.
+        existing = [u["username"] for u in self.wizard.list_users()]
+        dialog = AddUserDialog(self.root, existing_usernames=existing)
+        if not dialog.result:
+            return
+        username = dialog.result["username"]
+        password = dialog.result["password"]
+        threading.Thread(target=self._create_user_worker, args=(username, password), daemon=True).start()
+
+    def _create_user_worker(self, username, password):
+        buffer = io.StringIO()
+        created = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                created = self.wizard.add_user(username, password)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._create_user_done(username, created, buffer.getvalue()))
+
+    def _create_user_done(self, username, created, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        if created:
+            messagebox.showinfo("Created", f"Created user '{username}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not create user '{username}' — see log.")
         self._refresh_all_lists()
 
     def _delete_selected_group(self):

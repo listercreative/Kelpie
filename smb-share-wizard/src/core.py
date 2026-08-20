@@ -26,6 +26,22 @@ def _run(args, **kwargs):
     return subprocess.run(args, **kwargs)
 
 
+# Shown by all three UIs before resetting an existing user's password to
+# generate a QR code for them - explains this is a structural limitation of
+# how SMB/Samba/Windows store passwords, not a Kelpie shortcoming, and that
+# Kelpie itself never saves any username/password information; it's purely
+# an interface layer over the SMB/Samba tech underneath.
+QR_PASSWORD_RESET_NOTE = (
+    "SMB has no way to retrieve an existing password - Samba, Windows, and "
+    "macOS all store it as a one-way hash, never the plaintext, and Kelpie "
+    "itself never saves any username/password information either; it's "
+    "purely an interface layer over the SMB/Samba tech underneath, not a "
+    "credential store. Generating a QR code for an existing user means "
+    "setting a new password right now - the old one (and anything still "
+    "using it) will stop working until it's reconnected with the new one."
+)
+
+
 class SMBWizard:
     """Platform detection, persistence, privilege elevation, and the actual
     per-OS commands that create/apply an SMB share. No UI code lives here —
@@ -94,6 +110,28 @@ class SMBWizard:
         if self.has_admin_privileges():
             return self.delete_share(name)
         return self.elevate_and_delete(name)
+
+    def create_user(self, username, password):
+        # Requires root/admin. Creates (or resets the password of) a
+        # standalone account not attached to any share or group - lets a
+        # user get set up ahead of deciding what to grant them access to,
+        # instead of forcing a throwaway share into existence just to get
+        # the account created. Callers not already elevated should go
+        # through add_user() instead, which handles that.
+        if self.system == "Linux":
+            self._configure_linux_user(username, password)
+        elif self.system == "Darwin":
+            self._configure_macos_user(username, password)
+        elif self.system == "Windows":
+            self._configure_windows_user(username, password)
+        else:
+            return False
+        return True
+
+    def add_user(self, username, password):
+        if self.has_admin_privileges():
+            return self.create_user(username, password)
+        return self.elevate_and_create_user(username, password)
 
     def add_user_to_share(self, share_name, username, password):
         # Requires root. Callers not already elevated should go through
@@ -534,6 +572,9 @@ class SMBWizard:
             "--add-user", {"share": share_name, "username": username, "password": password}
         )
 
+    def elevate_and_create_user(self, username, password):
+        return self._elevated_relaunch("--create-user", {"username": username, "password": password})
+
     def elevate_and_revoke_access(self, share_name, username):
         return self._elevated_relaunch("--revoke-user", {"share": share_name, "username": username})
 
@@ -581,6 +622,21 @@ class SMBWizard:
         wizard = SMBWizard()
         wizard._invoking_user_override = data.get('_invoking_user')
         wizard.delete_share(data['name'])
+
+    @staticmethod
+    def create_user_from_file(path):
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+        wizard = SMBWizard()
+        wizard._invoking_user_override = data.get('_invoking_user')
+        wizard.create_user(data['username'], data['password'])
 
     @staticmethod
     def add_user_to_share_from_file(path):

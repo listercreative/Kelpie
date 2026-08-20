@@ -4,7 +4,7 @@ import io
 import os
 import threading
 
-from core import SMBWizard
+from core import SMBWizard, QR_PASSWORD_RESET_NOTE
 
 # Big block-letter "KELPIE" wordmark shown above the horse banner - width
 # matched to the logo (65 vs 63 columns) so they read as one unit.
@@ -270,7 +270,13 @@ class TUIWizard:
 
     def _users_groups_action_outside_curses(self, action):
         kind = action["action"]
-        if kind == "revoke_access":
+        if kind == "create_user":
+            print(f"\n--- Creating user '{action['username']}' ---")
+            if self.wizard.add_user(action["username"], action["password"]):
+                print(f"Created user '{action['username']}'.")
+            else:
+                print("Failed to create user (or elevation was cancelled).")
+        elif kind == "revoke_access":
             print(f"\n--- Revoking '{action['username']}''s access to '{action['share']}' ---")
             if self.wizard.revoke_share_access(action["share"], action["username"]):
                 print("Revoked access.")
@@ -345,7 +351,18 @@ class TUIWizard:
 
     def _users_groups_action_in_curses(self, action):
         kind = action["action"]
-        if kind == "revoke_access":
+        if kind == "create_user":
+            username, password = action["username"], action["password"]
+            print(f"--- Creating user '{username}' ---")
+            if self.wizard.has_admin_privileges():
+                ok = self.wizard.create_user(username, password)
+            else:
+                ok, output = self.wizard._elevated_relaunch_capturing(
+                    "--create-user", {"username": username, "password": password}
+                )
+                print(output, end="")
+            print(f"Created user '{username}'." if ok else "Failed to create user.")
+        elif kind == "revoke_access":
             share, username = action["share"], action["username"]
             print(f"--- Revoking '{username}''s access to '{share}' ---")
             if self.wizard.has_admin_privileges():
@@ -851,7 +868,7 @@ class TUIWizard:
 
             sub_options = ["Add user"]
             if share.get("users"):
-                sub_options.append("Generate new QR code")
+                sub_options.append("Reset Password & Show QR")
             sub_options.append("Delete share")
             sub_idx = self._menu(stdscr, share['name'], sub_options, subtitle=share.get('path', ''))
             if sub_idx is None:
@@ -860,20 +877,20 @@ class TUIWizard:
 
             if choice == "Delete share":
                 action = {"action": "delete", "name": share['name']}
-            elif choice == "Generate new QR code":
-                # Passwords are stored as hashes everywhere (Samba, Windows,
-                # macOS) - there's no way to retrieve an existing user's
-                # current password to encode. The only honest way to show a
-                # QR for an already-existing user is to reset it and encode
-                # the new one - same underlying operation as "Add user"
-                # (grant_share_access resets the password when the user
-                # already exists), just re-targeting a user already on this
-                # share instead of a fresh one.
+            elif choice == "Reset Password & Show QR":
+                # Same underlying operation as "Add user" - grant_share_access
+                # resets the password when the user already exists - just
+                # re-targeting a user already on this share instead of a
+                # fresh one. See QR_PASSWORD_RESET_NOTE for why this is a
+                # reset rather than a lookup: it's a structural limitation
+                # of SMB/Samba/Windows, not a Kelpie shortcoming, and Kelpie
+                # itself never saves any username/password information.
+                self._message(stdscr, QR_PASSWORD_RESET_NOTE)
                 existing_users = [u["username"] for u in share["users"]]
                 if len(existing_users) == 1:
                     username = existing_users[0]
                 else:
-                    uidx = self._menu(stdscr, "Generate QR for which user?", existing_users)
+                    uidx = self._menu(stdscr, "Reset password & show QR for which user?", existing_users)
                     if uidx is None:
                         continue
                     username = existing_users[uidx]
@@ -933,11 +950,12 @@ class TUIWizard:
     def _users_screen_flow(self, stdscr):
         while True:
             users = self.wizard.list_users()
-            if not users:
-                self._message(stdscr, "No users found.")
-                return None
 
-            items = [
+            # "+ New User" always available, even with no existing users -
+            # a standalone account not attached to any share or group, so a
+            # user doesn't have to create a throwaway share just to get an
+            # account to exist.
+            items = [("+ New User", [])] + [
                 (u["username"], [f"group: {g}" for g in u["groups"]] + [f"share: {s}" for s in u["shares"]])
                 for u in users
             ]
@@ -945,7 +963,21 @@ class TUIWizard:
             if idx is None:
                 return None
 
-            action = self._manage_user_flow(stdscr, users[idx])
+            if idx == 0:
+                username = self._text_input(stdscr, "Username:")
+                if not username:
+                    continue
+                password = self._text_input(stdscr, f"Password for {username}:", password=True)
+                if not password:
+                    continue
+                action = self._apply_or_bubble(
+                    stdscr, {"action": "create_user", "username": username, "password": password}
+                )
+                if action:
+                    return action
+                continue
+
+            action = self._manage_user_flow(stdscr, users[idx - 1])
             if action:
                 return action
             # otherwise back out of the submenu - show this screen again
@@ -1073,6 +1105,7 @@ class TUIWizard:
         if self.wizard.elevation_needs_terminal():
             return action
         busy = {
+            "create_user": f"Creating user '{action.get('username')}'...",
             "revoke_access": f"Revoking access to '{action.get('share')}'...",
             "delete_user": f"Deleting user '{action.get('username')}'...",
             "delete_group": f"Deleting group '{action.get('name')}'...",

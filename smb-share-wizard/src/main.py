@@ -48,6 +48,7 @@ Usage:
     RELAUNCH_HANDLERS = {
         "--apply": "apply_from_file",
         "--delete-share": "delete_share_from_file",
+        "--create-user": "create_user_from_file",
         "--add-user": "add_user_to_share_from_file",
         "--revoke-user": "revoke_share_access_from_file",
         "--delete-user": "delete_user_from_file",

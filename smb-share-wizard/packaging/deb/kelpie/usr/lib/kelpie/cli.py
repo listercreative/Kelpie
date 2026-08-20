@@ -3,7 +3,7 @@ import getpass
 from rich.console import Console
 from rich.panel import Panel
 
-from core import SMBWizard
+from core import SMBWizard, QR_PASSWORD_RESET_NOTE
 
 console = Console()
 
@@ -102,7 +102,7 @@ class CLIWizard(SMBWizard):
         print(f"\n--- {share['name']} ---")
         print("1. Add user")
         if has_users:
-            print("2. Generate new QR code (for an existing user)")
+            print("2. Reset Password & Show QR (for an existing user)")
             print("3. Delete share")
             print("4. Back")
         else:
@@ -122,11 +122,11 @@ class CLIWizard(SMBWizard):
             else:
                 print("Failed to add user (or elevation was cancelled).")
         elif has_users and sub == '2':
-            # Passwords are stored as hashes everywhere (Samba, Windows,
-            # macOS) - there's no way to retrieve an existing user's
-            # current password to encode. The only honest way to show a QR
-            # for an already-existing user is to reset it and encode the
-            # new one, same underlying operation "Add user" does above.
+            # Same underlying operation as "Add user" above -
+            # grant_share_access resets the password when the user already
+            # exists - just re-targeting a user already on this share
+            # instead of a fresh one.
+            console.print(f"\n[yellow]{QR_PASSWORD_RESET_NOTE}[/yellow]\n")
             users = share["users"]
             if len(users) == 1:
                 username = users[0]["username"]
@@ -134,7 +134,7 @@ class CLIWizard(SMBWizard):
                 print("   Users on this share:")
                 for i, u in enumerate(users):
                     print(f"     {i}. {u['username']}")
-                uidx = input("   Generate QR for which user number? ").strip()
+                uidx = input("   Reset password & show QR for which user number? ").strip()
                 if not uidx.isdigit() or not (0 <= int(uidx) < len(users)):
                     print("Invalid user number.")
                     return
@@ -177,7 +177,6 @@ class CLIWizard(SMBWizard):
             console.print("\n[bold]--- Users ---[/bold]")
             if not users:
                 print("No users found.")
-                return
             for i, u in enumerate(users):
                 print(f"U{i}. {u['username']}")
                 for g in u["groups"]:
@@ -185,13 +184,32 @@ class CLIWizard(SMBWizard):
                 for s in u["shares"]:
                     print(f"\tshare: {s}")
 
-            print("\na<n> = assign to a(nother) group")
+            print("\nn = create a new user (not attached to any share or group)")
+            print("a<n> = assign to a(nother) group")
             print("g<n> = remove from a group")
             print("r<n> = revoke access to a share")
             print("d<n> = delete the user entirely")
             choice = input("Select an option, or press Enter to return: ").strip().lower()
             if not choice:
                 return
+
+            if choice == 'n':
+                # A standalone account - lets a user get set up ahead of
+                # deciding what to grant them access to, instead of forcing
+                # a throwaway share into existence just to create it.
+                username = console.input("   Username: ").strip()
+                if not username:
+                    console.print("[red]Username cannot be empty.[/red]")
+                    continue
+                password = getpass.getpass(f"   Password for {username}: ")
+                if not password:
+                    console.print("[red]Password cannot be empty.[/red]")
+                    continue
+                if self.add_user(username, password):
+                    print(f"Created user '{username}'.")
+                else:
+                    print("Failed to create user (or elevation was cancelled).")
+                continue
 
             kind, rest = choice[0], choice[1:]
             if kind not in ('a', 'g', 'r', 'd') or not rest.isdigit() or not (0 <= int(rest) < len(users)):
