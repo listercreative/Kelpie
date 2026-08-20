@@ -63,7 +63,7 @@
                   Return="ignore" />
 
     <InstallExecuteSequence>
-      <Custom Action="KelpieUninstallCleanup" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="KelpieUninstallCleanup" Before="RemoveFiles" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
     </InstallExecuteSequence>
 
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
