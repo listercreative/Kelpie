@@ -286,6 +286,9 @@ class GUIWizard:
         btn_frame.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(btn_frame, text="Refresh", command=self._refresh_manage_list).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Add User...", command=self._add_user_to_selected_share).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Show QR Code...", command=self._show_qr_for_selected_share).pack(
+            side="left", padx=4
+        )
         ttk.Button(btn_frame, text="Delete Selected", command=self._delete_selected_share).pack(side="left", padx=4)
 
     def _build_users_groups_tab(self):
@@ -453,6 +456,49 @@ class GUIWizard:
             return
         username = dialog.result["username"]
         password = dialog.result["password"]
+        threading.Thread(
+            target=self._grant_access_worker, args=(share_name, username, password), daemon=True
+        ).start()
+
+    def _show_qr_for_selected_share(self):
+        # Passwords are stored as hashes everywhere (Samba, Windows, macOS)
+        # - there's no way to retrieve an existing user's current password
+        # to encode. The only honest way to show a QR for an
+        # already-existing user is to reset it and encode the new one -
+        # same underlying operation _add_user_to_selected_share does above,
+        # so this reuses the same worker/QR-offer path, just re-targeting a
+        # user already on the share instead of a fresh one.
+        selection = self.shares_list.selection()
+        if not selection:
+            messagebox.showinfo("Show QR code", "Select a share first.")
+            return
+        share_name = self.shares_list.item(selection[0], "values")[0]
+        share = next((s for s in self.wizard.list_shares() if s["name"] == share_name), None)
+        users = share.get("users", []) if share else []
+        if not users:
+            messagebox.showinfo("Show QR code", f"'{share_name}' has no users yet — add one first.")
+            return
+
+        if len(users) == 1:
+            username = users[0]["username"]
+        else:
+            dialog = ChoiceDialog(
+                self.root, "Choose user", "Generate a new QR code for which user?",
+                [u["username"] for u in users], ok_label="Next"
+            )
+            if not dialog.result:
+                return
+            username = dialog.result
+
+        from tkinter import simpledialog
+        password = simpledialog.askstring(
+            "New password",
+            f"New password for '{username}' (replaces their current one):",
+            show="*", parent=self.root,
+        )
+        if not password:
+            return
+
         threading.Thread(
             target=self._grant_access_worker, args=(share_name, username, password), daemon=True
         ).start()

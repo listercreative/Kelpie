@@ -849,13 +849,40 @@ class TUIWizard:
                 return None
             share = shares[idx]
 
-            sub_options = ["Add user", "Delete share"]
+            sub_options = ["Add user"]
+            if share.get("users"):
+                sub_options.append("Generate new QR code")
+            sub_options.append("Delete share")
             sub_idx = self._menu(stdscr, share['name'], sub_options, subtitle=share.get('path', ''))
             if sub_idx is None:
                 continue
+            choice = sub_options[sub_idx]
 
-            if sub_options[sub_idx] == "Delete share":
+            if choice == "Delete share":
                 action = {"action": "delete", "name": share['name']}
+            elif choice == "Generate new QR code":
+                # Passwords are stored as hashes everywhere (Samba, Windows,
+                # macOS) - there's no way to retrieve an existing user's
+                # current password to encode. The only honest way to show a
+                # QR for an already-existing user is to reset it and encode
+                # the new one - same underlying operation as "Add user"
+                # (grant_share_access resets the password when the user
+                # already exists), just re-targeting a user already on this
+                # share instead of a fresh one.
+                existing_users = [u["username"] for u in share["users"]]
+                if len(existing_users) == 1:
+                    username = existing_users[0]
+                else:
+                    uidx = self._menu(stdscr, "Generate QR for which user?", existing_users)
+                    if uidx is None:
+                        continue
+                    username = existing_users[uidx]
+                password = self._text_input(
+                    stdscr, f"New password for {username}\n(replaces their current one):", password=True
+                )
+                if not password:
+                    continue
+                action = {"action": "add_user", "share": share['name'], "username": username, "password": password}
             else:
                 username = self._pick_or_type_username(stdscr)
                 if not username:

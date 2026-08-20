@@ -98,10 +98,16 @@ class CLIWizard(SMBWizard):
             return
         share = shares[idx]
 
+        has_users = bool(share.get("users"))
         print(f"\n--- {share['name']} ---")
         print("1. Add user")
-        print("2. Delete share")
-        print("3. Back")
+        if has_users:
+            print("2. Generate new QR code (for an existing user)")
+            print("3. Delete share")
+            print("4. Back")
+        else:
+            print("2. Delete share")
+            print("3. Back")
         sub = input("Select an option: ").strip()
 
         if sub == '1':
@@ -115,7 +121,34 @@ class CLIWizard(SMBWizard):
                 self._offer_qr_code(share['name'], username, password)
             else:
                 print("Failed to add user (or elevation was cancelled).")
-        elif sub == '2':
+        elif has_users and sub == '2':
+            # Passwords are stored as hashes everywhere (Samba, Windows,
+            # macOS) - there's no way to retrieve an existing user's
+            # current password to encode. The only honest way to show a QR
+            # for an already-existing user is to reset it and encode the
+            # new one, same underlying operation "Add user" does above.
+            users = share["users"]
+            if len(users) == 1:
+                username = users[0]["username"]
+            else:
+                print("   Users on this share:")
+                for i, u in enumerate(users):
+                    print(f"     {i}. {u['username']}")
+                uidx = input("   Generate QR for which user number? ").strip()
+                if not uidx.isdigit() or not (0 <= int(uidx) < len(users)):
+                    print("Invalid user number.")
+                    return
+                username = users[int(uidx)]["username"]
+            password = getpass.getpass(f"   New password for {username} (replaces their current one): ")
+            if not password:
+                console.print("[red]Password cannot be empty.[/red]")
+                return
+            if self.grant_share_access(share['name'], username, password):
+                print(f"Reset '{username}''s password on share '{share['name']}'.")
+                self._offer_qr_code(share['name'], username, password)
+            else:
+                print("Failed to reset password (or elevation was cancelled).")
+        elif sub == ('3' if has_users else '2'):
             if self.remove_share(share['name']):
                 print(f"Removed share: {share['name']}")
             else:
