@@ -53,10 +53,6 @@ class CLIWizard(SMBWizard):
             password = getpass.getpass(f"   Password for {username}: ")
             self.users.append({'username': username, 'password': password})
 
-        if not self.users:
-            console.print("[red]Error: At least one user must be configured.[/red]")
-            return False
-
         return True
 
     def manage_shares(self):

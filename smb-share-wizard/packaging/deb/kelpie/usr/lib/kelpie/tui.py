@@ -760,9 +760,6 @@ class TUIWizard:
                 return None
 
         users = self._manage_users(stdscr)
-        if not users:
-            self._message(stdscr, "At least one user is required.\nShare not created.")
-            return None
 
         self._message(stdscr, f"Now applying '{name}' to the system (leaving this screen)...")
         return {"name": name, "path": path, "users": users}

@@ -287,10 +287,10 @@ class GUIWizard:
             padx=8, pady=(0, 8), anchor="w"
         )
 
-    def _refresh_users_groups(self):
+    def _populate_users_groups(self, groups, users):
         for item in self.groups_list.get_children():
             self.groups_list.delete(item)
-        for g in self.wizard.list_groups():
+        for g in groups:
             gid = self.groups_list.insert("", tk.END, text=g["name"], open=True)
             for m in g["members"]:
                 self.groups_list.insert(gid, tk.END, text=f"user: {m}")
@@ -299,16 +299,35 @@ class GUIWizard:
 
         for item in self.system_users_list.get_children():
             self.system_users_list.delete(item)
-        for u in self.wizard.list_users():
+        for u in users:
             uid = self.system_users_list.insert("", tk.END, text=u["username"], open=True)
             for g in u["groups"]:
                 self.system_users_list.insert(uid, tk.END, text=f"group: {g}")
             for s in u["shares"]:
                 self.system_users_list.insert(uid, tk.END, text=f"share: {s}")
 
+    def _refresh_users_groups(self):
+        self._populate_users_groups(self.wizard.list_groups(), self.wizard.list_users())
+
     def _refresh_all_lists(self):
-        self._refresh_manage_list()
-        self._refresh_users_groups()
+        # Bound to <<NotebookTabChanged>> - fires on every tab click.
+        # list_shares/list_groups/list_users each shell out (PowerShell on
+        # Windows especially, one process per call even after batching),
+        # so running them synchronously here made every tab switch
+        # visibly stall the whole window. Fetch in the background and
+        # apply to the Treeviews on the main thread once ready.
+        threading.Thread(target=self._refresh_all_lists_worker, daemon=True).start()
+
+    def _refresh_all_lists_worker(self):
+        shares = self.wizard.list_shares()
+        groups = self.wizard.list_groups()
+        users = self.wizard.list_users()
+
+        def apply():
+            self._populate_shares_list(shares)
+            self._populate_users_groups(groups, users)
+
+        self.root.after(0, apply)
 
     def _selected_top_level_text(self, tree):
         # Action buttons work whether you selected the top-level row
@@ -353,14 +372,17 @@ class GUIWizard:
             del self.pending_users[index]
             self.users_list.delete(item)
 
-    def _refresh_manage_list(self):
+    def _populate_shares_list(self, shares):
         for item in self.shares_list.get_children():
             self.shares_list.delete(item)
-        for share in self.wizard.list_shares():
+        for share in shares:
             users = ", ".join(u["username"] for u in share.get("users", [])) or "(none)"
             self.shares_list.insert(
                 "", tk.END, values=(share.get("name", "?"), share.get("path", "Unknown"), users)
             )
+
+    def _refresh_manage_list(self):
+        self._populate_shares_list(self.wizard.list_shares())
 
     def _add_user_to_selected_share(self):
         selection = self.shares_list.selection()
@@ -653,8 +675,9 @@ class GUIWizard:
         if not name:
             messagebox.showerror("Invalid input", "Share name cannot be empty.")
             return
-        if not self.pending_users:
-            messagebox.showerror("Invalid input", "At least one user must be configured.")
+        path_ok, path_message = self.wizard.check_share_path(path)
+        if not path_ok:
+            messagebox.showerror("Invalid path", path_message)
             return
 
         self.wizard.share_name = name

@@ -383,18 +383,24 @@ class SMBWizard:
         paths.update(os.path.abspath(p) for p in system_paths.get(self.system, []))
         return paths
 
-    def _validate_share_path(self):
-        resolved = os.path.abspath(os.path.expanduser(self.share_path))
+    def check_share_path(self, path=None):
+        # Returns (ok, message). Callable with an explicit path so UI layers
+        # can validate what's typed/picked *before* submitting, not just as
+        # a last-ditch guard inside dispatch_execution() - the earlier this
+        # gets caught, the less chance of it looking like a silent failure.
+        check_path = self.share_path if path is None else path
+        resolved = os.path.abspath(os.path.expanduser(check_path))
         if resolved in self._unsafe_share_paths():
-            print(
-                f"Refusing to use '{self.share_path}' as a share path: it resolves to "
+            return False, (
+                f"Refusing to use '{check_path}' as a share path: it resolves to "
                 f"'{resolved}', a home or system directory. Choose (or create) a subfolder instead."
             )
-            return False
-        return True
+        return True, None
 
     def dispatch_execution(self):
-        if not self._validate_share_path():
+        ok, message = self.check_share_path()
+        if not ok:
+            print(message)
             return
         if self.system == "Windows": self.run_windows()
         elif self.system == "Linux": self.run_linux()
@@ -979,13 +985,19 @@ class SMBWizard:
         if f"[{share_name}]" in existing:
             print(f"[Linux] Share block for '{share_name}' already exists in {smb_conf}, skipping.")
             return
+        # An empty "valid users" line means UNSET to Samba - no restriction
+        # at all, open to every Samba user - not "nobody". Write the same
+        # unmatchable placeholder _rewrite_valid_users uses for that case,
+        # so a share created with zero users starts genuinely inaccessible
+        # instead of wide open. Filtered back out wherever shares are read.
+        valid_users = usernames if usernames else [self._NO_USERS_PLACEHOLDER]
         block = (
             f"\n[{share_name}]\n"
             f"    path = {share_path}\n"
             f"    browsable = yes\n"
             f"    read only = no\n"
             f"    guest ok = no\n"
-            f"    valid users = {' '.join(usernames)}\n"
+            f"    valid users = {' '.join(valid_users)}\n"
         )
         with open(smb_conf, 'a') as f:
             f.write(block)
