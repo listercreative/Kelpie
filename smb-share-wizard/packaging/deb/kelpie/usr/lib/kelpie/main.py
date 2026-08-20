@@ -19,10 +19,27 @@ if __name__ == "__main__":
             from cli import CLIWizard
             CLIWizard().start()
 
+    def run_gui_then_tui():
+        try:
+            from gui import GUIWizard
+            GUIWizard().run()
+        except Exception as e:
+            print(f"GUI unavailable ({e}); falling back to the terminal wizard.")
+            run_tui_then_basic()
+
+    def print_help():
+        print("""Kelpie - cross-platform SMB share configuration wizard
+
+Usage:
+  kelpie              Launch the terminal UI (TUI)
+  kelpie --gui         Launch the graphical desktop UI
+  kelpie --help, -h    Show this help message and exit""")
+
     # Each of these is a relaunch target for SMBWizard._elevated_relaunch():
     # the flag matches what elevate_and_*() passed as arg_flag, and the
     # value is the *_from_file() entry point that consumes the temp JSON
-    # payload written before elevation.
+    # payload written before elevation. Internal only - not part of the
+    # user-facing flag set validated below.
     RELAUNCH_HANDLERS = {
         "--apply": "apply_from_file",
         "--delete-share": "delete_share_from_file",
@@ -38,14 +55,27 @@ if __name__ == "__main__":
         if len(sys.argv) >= 3 and sys.argv[1] in RELAUNCH_HANDLERS:
             from core import SMBWizard
             getattr(SMBWizard, RELAUNCH_HANDLERS[sys.argv[1]])(sys.argv[2])
-        elif "--cli" in sys.argv:
-            run_tui_then_basic()
         else:
-            try:
-                from gui import GUIWizard
-                GUIWizard().run()
-            except Exception as e:
-                print(f"GUI unavailable ({e}); falling back to the terminal wizard.")
+            args = sys.argv[1:]
+            recognized = {"--gui", "--help", "-h"}
+            unknown = [a for a in args if a not in recognized]
+            if unknown:
+                print(f"Unknown option: {unknown[0]}", file=sys.stderr)
+                print("See 'kelpie --help' for usage.", file=sys.stderr)
+                sys.exit(2)
+
+            if "--help" in args or "-h" in args:
+                print_help()
+            elif "--gui" in args:
+                run_gui_then_tui()
+            elif os.name == "nt":
+                # A --windowed PyInstaller build (how Kelpie.exe is built)
+                # has no console to attach a curses TUI to, whether it was
+                # launched by double-click or from a terminal - GUI is the
+                # only usable default here until/unless a separate
+                # console-subsystem Windows build exists.
+                run_gui_then_tui()
+            else:
                 run_tui_then_basic()
     except KeyboardInterrupt:
         print("\nCancelled.")
