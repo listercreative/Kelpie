@@ -7,7 +7,7 @@
 #
 # One-time tool setup:
 #   dotnet tool install --global wix --version 5.0.2
-#   wix extension add WixToolset.UI.wixext/5.0.2
+#   wix extension add --global WixToolset.UI.wixext/5.0.2
 
 $ErrorActionPreference = "Stop"
 
@@ -26,6 +26,10 @@ function Assert-LastExitCode($what) {
 # its --specpath (build\), not the invocation directory, so a plain
 # "..\..\src\..." here lands one level short. Absolute paths sidestep that
 # entirely, and also let this script work no matter where it's invoked from.
+# PyInstaller's own build also leaves the process's CWD changed afterward,
+# which matters for `wix build`: WiX's extension store is looked up
+# relative to CWD unless the extension was added with --global, so pin the
+# CWD back before that step regardless.
 $RepoSrc = Resolve-Path (Join-Path $PSScriptRoot "..\..\src")
 
 python -m pip install --upgrade pip
@@ -45,6 +49,7 @@ pyinstaller `
   (Join-Path $RepoSrc "main.py")
 Assert-LastExitCode "pyinstaller"
 
+Set-Location $PSScriptRoot
 wix build (Join-Path $PSScriptRoot "kelpie.wxs") -ext WixToolset.UI.wixext -out (Join-Path $PSScriptRoot "Kelpie.msi")
 Assert-LastExitCode "wix build"
 
