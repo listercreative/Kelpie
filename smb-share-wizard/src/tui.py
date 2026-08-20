@@ -193,6 +193,12 @@ class TUIWizard:
             self.wizard.dispatch_execution()
         else:
             self.wizard.elevate_and_apply(share_data)
+        # Checked against live share state, not a return value - neither
+        # dispatch_execution() nor elevate_and_apply() report success
+        # directly, and this works the same regardless of which path ran.
+        if any(s['name'] == share_data['name'] for s in self.wizard.list_shares()):
+            for user in share_data["users"]:
+                self._offer_qr_code_plain(share_data["name"], user["username"], user["password"])
 
     def _delete_outside_curses(self, name):
         print(f"\n--- Removing share '{name}' ---")
@@ -206,8 +212,61 @@ class TUIWizard:
         print(f"\n--- Adding '{username}' to share '{share}' ---")
         if self.wizard.grant_share_access(share, username, action["password"]):
             print(f"Added '{username}' to share '{share}'.")
+            self._offer_qr_code_plain(share, username, action["password"])
         else:
             print("Failed to add user (or elevation was cancelled).")
+
+    def _offer_qr_code_plain(self, share_name, username, password):
+        # Used when the real terminal is already available (curses has
+        # already torn down - see run()) - only ever offered right when a
+        # password was just set, since Kelpie never persists plaintext
+        # passwords and so has no way to regenerate this later.
+        confirm = input(f"\nShow a LockNAS QR code for '{username}'? [y/N] ").strip().lower()
+        if confirm not in ('y', 'yes'):
+            return
+        try:
+            import qrcode
+        except ImportError:
+            print("The 'qrcode' package isn't installed.")
+            return
+        print("Contains this user's password in plain sight - only display it somewhere private.\n")
+        payload = self.wizard.build_locknas_qr_payload(share_name, username, password)
+        qr = qrcode.QRCode()
+        qr.add_data(payload)
+        qr.make()
+        qr.print_ascii(tty=True)
+        input("\nPress Enter to continue...")
+
+    def _offer_qr_codes_in_curses(self, stdscr, share_name, users):
+        for user in users:
+            choice = self._menu(stdscr, f"LockNAS QR - {user['username']}", ["Show QR code", "Skip"])
+            if choice == 0:
+                self._show_qr_in_terminal(stdscr, share_name, user["username"], user["password"])
+
+    def _show_qr_in_terminal(self, stdscr, share_name, username, password):
+        # Rendering a QR code reliably needs the real terminal, not curses -
+        # same "temporarily give up the terminal" pattern used elsewhere for
+        # elevation prompts that need it, just scoped to endwin()/refresh()
+        # instead of a full curses.wrapper teardown since nothing else here
+        # needs to happen outside curses.
+        curses.endwin()
+        try:
+            print(f"\n--- LockNAS QR code for '{username}' ---")
+            try:
+                import qrcode
+            except ImportError:
+                print("The 'qrcode' package isn't installed.")
+                input("\nPress Enter to continue...")
+                return
+            print("Contains this user's password in plain sight - only display it somewhere private.\n")
+            payload = self.wizard.build_locknas_qr_payload(share_name, username, password)
+            qr = qrcode.QRCode()
+            qr.add_data(payload)
+            qr.make()
+            qr.print_ascii(tty=True)
+            input("\nPress Enter to continue...")
+        finally:
+            stdscr.refresh()
 
     def _users_groups_action_outside_curses(self, action):
         kind = action["action"]
@@ -411,6 +470,8 @@ class TUIWizard:
                         stdscr, f"Creating share '{share_data['name']}'...",
                         lambda: self._apply_in_curses(share_data)
                     )
+                    if any(s['name'] == share_data['name'] for s in self.wizard.list_shares()):
+                        self._offer_qr_codes_in_curses(stdscr, share_data['name'], share_data['users'])
             elif selected == "Manage Existing Shares":
                 # _manage_shares_flow only returns non-None when the action
                 # genuinely needs the terminal (see its docstring) - the
@@ -817,6 +878,13 @@ class TUIWizard:
                     stdscr, f"Adding '{action['username']}' to '{action['share']}'...",
                     lambda: self._add_user_in_curses(action)
                 )
+                if any(
+                    action["username"] in [u["username"] for u in s.get("users", [])]
+                    for s in self.wizard.list_shares() if s["name"] == action["share"]
+                ):
+                    self._offer_qr_codes_in_curses(
+                        stdscr, action["share"], [{"username": action["username"], "password": action["password"]}]
+                    )
             # loop back and show the (refreshed) share list again
 
     def _users_groups_flow(self, stdscr):

@@ -1,6 +1,7 @@
 import os
 import platform
 import re
+import socket
 import sys
 import subprocess
 import json
@@ -712,6 +713,50 @@ foreach ($username in $affectedUsers.Keys) {{
     def _ps_quote(self, s):
         # Escape for embedding inside a PowerShell single-quoted string.
         return s.replace("'", "''")
+
+    def _detect_lan_ip(self):
+        # The classic UDP-connect trick: connecting a UDP socket never
+        # actually sends a packet (no handshake for a connectionless
+        # protocol), it just asks the OS to pick the local address it
+        # would route through to reach that destination - the same
+        # interface selection logic real traffic would use, without
+        # depending on any platform-specific ipconfig/ifconfig parsing.
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+            finally:
+                s.close()
+        except Exception:
+            return ""
+
+    def _detect_tailscale_ip(self):
+        try:
+            proc = _run(["tailscale", "ip", "-4"], capture_output=True, text=True)
+        except (FileNotFoundError, OSError):
+            return ""
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return ""
+        return proc.stdout.strip().splitlines()[0]
+
+    def build_locknas_qr_payload(self, share_name, username, password):
+        # Matches LockNAS's own BridgeQrCode.decode() format exactly (see
+        # NASPicker/app/src/main/java/.../storage/BridgeQrCode.kt) so a scan
+        # populates a new bridge with zero manual entry. Only ever call this
+        # right when a password is set (share creation / add user) - Kelpie
+        # doesn't persist plaintext passwords anywhere, so there's no way to
+        # generate this later for an existing user.
+        return json.dumps({
+            "type": "locknas_bridge",
+            "name": share_name,
+            "ipOrHost": self._detect_lan_ip(),
+            "port": 445,
+            "sharePath": share_name,
+            "tailscaleIpOrHost": self._detect_tailscale_ip(),
+            "username": username,
+            "password": password,
+        })
 
     def _windows_group_name(self, share_name):
         cleaned = re.sub(r'[\"/\\\[\]:;|=,+*?<>@\x00-\x1f]', '_', share_name).strip()

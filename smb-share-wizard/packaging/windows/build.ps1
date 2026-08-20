@@ -33,7 +33,7 @@ function Assert-LastExitCode($what) {
 $RepoSrc = Resolve-Path (Join-Path $PSScriptRoot "..\..\src")
 
 python -m pip install --upgrade pip
-python -m pip install pyinstaller rich
+python -m pip install pyinstaller rich "qrcode[pil]"
 
 pyinstaller `
   --onefile `
@@ -44,6 +44,7 @@ pyinstaller `
   --add-data "$(Join-Path $RepoSrc 'kelpie_icon.png');." `
   --hidden-import=core --hidden-import=cli --hidden-import=gui --hidden-import=tui `
   --collect-all=rich `
+  --collect-all=qrcode `
   --distpath $PSScriptRoot `
   --workpath (Join-Path $PSScriptRoot "build") `
   --specpath (Join-Path $PSScriptRoot "build") `

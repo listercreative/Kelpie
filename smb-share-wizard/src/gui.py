@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -102,6 +103,50 @@ class ChoiceDialog(tk.Toplevel):
     def _on_ok(self):
         self.result = self.choice_var.get()
         self.destroy()
+
+
+class QrCodeDialog(tk.Toplevel):
+    """Shows a LockNAS bridge QR code for one just-created (or just-granted)
+    user. Only ever constructible with a payload already in hand - Kelpie
+    doesn't persist plaintext passwords, so this can't be regenerated later
+    for an existing user from a "Manage Shares" style screen."""
+    def __init__(self, parent, share_name, username, payload):
+        super().__init__(parent)
+        self.title(f"LockNAS QR - {username}")
+        self.resizable(False, False)
+        self.transient(parent)
+
+        import qrcode
+        img = qrcode.make(payload)
+        fd, png_path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        try:
+            img.save(png_path)
+            # Keep a reference on self - PhotoImage has no strong reference
+            # of its own, and Tk garbage-collects it out from under the
+            # Label the instant nothing else in Python still points to it.
+            self._photo = tk.PhotoImage(file=png_path)
+        finally:
+            try:
+                os.remove(png_path)
+            except Exception:
+                pass
+
+        ttk.Label(
+            self, text=f"Scan with LockNAS to add '{share_name}' as {username}", padding=8
+        ).pack()
+        ttk.Label(self, image=self._photo).pack(padx=12, pady=4)
+        ttk.Label(
+            self,
+            text="Contains this user's password in plain sight - don't leave it\n"
+                 "on screen or let anyone photograph it who shouldn't have access.",
+            foreground="#b00000", justify="center", padding=8,
+        ).pack()
+        ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 10))
+
+        _center_over_parent(self, parent)
+        self.grab_set()
+        self.wait_window(self)
 
 
 class GUIWizard:
@@ -420,13 +465,16 @@ class GUIWizard:
                 added = self.wizard.grant_share_access(share_name, username, password)
         except Exception as e:
             buffer.write(f"\nUnexpected error: {e}\n")
-        self.root.after(0, lambda: self._grant_access_done(share_name, username, added, buffer.getvalue()))
+        self.root.after(
+            0, lambda: self._grant_access_done(share_name, username, password, added, buffer.getvalue())
+        )
 
-    def _grant_access_done(self, share_name, username, added, log_output):
+    def _grant_access_done(self, share_name, username, password, added, log_output):
         if log_output.strip():
             self._append_log(log_output)
         if added:
             messagebox.showinfo("Added", f"Added '{username}' to share '{share_name}'.")
+            self._offer_qr_codes(share_name, [{"username": username, "password": password}])
         else:
             messagebox.showerror("Failed", f"Could not add '{username}' to share '{share_name}' — see log.")
         self._refresh_all_lists()
@@ -711,6 +759,11 @@ class GUIWizard:
             self.users_list.delete(item)
 
     def _apply_worker(self):
+        # Captured up front, not re-read from self.wizard in _apply_done -
+        # the "Create Share" button is disabled for the duration, but this
+        # keeps the QR-offer step correct even if that ever changes.
+        share_name = self.wizard.share_name
+        users = list(self.wizard.users)
         buffer = io.StringIO()
         try:
             with contextlib.redirect_stdout(buffer):
@@ -726,14 +779,46 @@ class GUIWizard:
         except Exception as e:
             buffer.write(f"\nUnexpected error: {e}\n")
 
-        self.root.after(0, lambda: self._apply_done(buffer.getvalue()))
+        self.root.after(0, lambda: self._apply_done(buffer.getvalue(), share_name, users))
 
-    def _apply_done(self, log_output):
+    def _apply_done(self, log_output, share_name, users):
         self._append_log(log_output)
         self.create_button.configure(state="normal")
         self.status_label.configure(text="Idle")
         self._refresh_all_lists()
         messagebox.showinfo("Done", "Configuration attempt finished — see the log for details.")
+        if "Success." in log_output and users:
+            self._offer_qr_codes(share_name, users)
+
+    def _offer_qr_codes(self, share_name, users):
+        # users: [{"username": ..., "password": ...}, ...] - only ever
+        # offered right when a password was just set (share creation / add
+        # user), since Kelpie never persists plaintext passwords and so has
+        # no way to regenerate this later for an existing user.
+        if not messagebox.askyesno(
+            "LockNAS QR Code",
+            "Show a QR code so a LockNAS phone can scan and auto-configure this share?\n\n"
+            "The code contains this user's password in plain sight - only display it "
+            "somewhere private."
+        ):
+            return
+        remaining = list(users)
+        while remaining:
+            if len(remaining) == 1:
+                user = remaining[0]
+            else:
+                dialog = ChoiceDialog(
+                    self.root, "Choose user", "Show QR code for which user?",
+                    [u["username"] for u in remaining], ok_label="Show"
+                )
+                if not dialog.result:
+                    return
+                user = next(u for u in remaining if u["username"] == dialog.result)
+            payload = self.wizard.build_locknas_qr_payload(share_name, user["username"], user["password"])
+            QrCodeDialog(self.root, share_name, user["username"], payload)
+            remaining = [u for u in remaining if u is not user]
+            if remaining and not messagebox.askyesno("LockNAS QR Code", "Show another user's QR code?"):
+                return
 
 
 def main():

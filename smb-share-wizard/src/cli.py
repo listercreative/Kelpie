@@ -25,6 +25,29 @@ class CLIWizard(SMBWizard):
             return users[int(raw)]['username']
         return raw
 
+    def _offer_qr_code(self, share_name, username, password):
+        # Only ever offered right when a password was just set (share
+        # creation / add user) - Kelpie never persists plaintext passwords,
+        # so this can't be regenerated later for an existing user.
+        confirm = console.input("\nShow a LockNAS QR code for this user? [y/N] ").strip().lower()
+        if confirm not in ('y', 'yes'):
+            return
+        try:
+            import qrcode
+        except ImportError:
+            console.print("[red]The 'qrcode' package isn't installed.[/red]")
+            return
+        console.print(
+            "[bold red]Contains this user's password in plain sight - only display "
+            "it somewhere private.[/bold red]"
+        )
+        payload = self.build_locknas_qr_payload(share_name, username, password)
+        qr = qrcode.QRCode()
+        qr.add_data(payload)
+        qr.make()
+        qr.print_ascii(tty=True)
+        console.input("\nPress Enter to continue...")
+
     def collect_user_input(self):
         console.print(Panel("[bold blue]New SMB Share Creation[/bold blue]", expand=False))
 
@@ -89,6 +112,7 @@ class CLIWizard(SMBWizard):
             password = getpass.getpass(f"   Password for {username}: ")
             if self.grant_share_access(share['name'], username, password):
                 print(f"Added '{username}' to share '{share['name']}'.")
+                self._offer_qr_code(share['name'], username, password)
             else:
                 print("Failed to add user (or elevation was cancelled).")
         elif sub == '2':
@@ -303,6 +327,13 @@ class CLIWizard(SMBWizard):
                             "path": self.share_path,
                             "users": self.users
                         })
+                    # Checked against live share state, not a return value -
+                    # dispatch_execution()/elevate_and_apply() don't report
+                    # success directly, and this works the same regardless
+                    # of which path ran.
+                    if any(s['name'] == self.share_name for s in self.list_shares()):
+                        for user in self.users:
+                            self._offer_qr_code(self.share_name, user['username'], user['password'])
             elif selected == "Manage Existing Shares":
                 self.manage_shares()
             elif selected == "Manage Users & Groups":
