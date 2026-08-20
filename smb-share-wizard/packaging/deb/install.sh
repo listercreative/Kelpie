@@ -5,6 +5,28 @@
 # no .deb-internal hook (preinst included) fires before apt starts.
 set -e
 
+# This installer only actually has one real package built: the .deb (see
+# build.sh). Detect the distro via /etc/os-release (the standard, portable
+# way - present on virtually every modern Linux distro) and refuse cleanly
+# on anything outside the Debian/Ubuntu family, rather than blindly running
+# `apt`/`dpkg` on a system that may not even have them and failing with a
+# confusing error partway through.
+DISTRO_ID=""
+DISTRO_LIKE=""
+if [ -f /etc/os-release ]; then
+    DISTRO_ID=$(. /etc/os-release && echo "$ID")
+    DISTRO_LIKE=$(. /etc/os-release && echo "$ID_LIKE")
+fi
+case " $DISTRO_ID $DISTRO_LIKE " in
+    *" debian "*|*" ubuntu "*) ;;
+    *)
+        echo "This installer only supports Debian/Ubuntu-family distros (it installs a .deb via apt)." >&2
+        echo "Detected: ${DISTRO_ID:-unknown}${DISTRO_LIKE:+ (like: $DISTRO_LIKE)}" >&2
+        echo "Kelpie isn't packaged for this distro yet - see ../../src/main.py to run it directly with Python 3." >&2
+        exit 1
+        ;;
+esac
+
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 DEB_PATH="$SCRIPT_DIR/kelpie_0.1.0_all.deb"
 
