@@ -38,6 +38,7 @@ python -m pip install pyinstaller rich
 pyinstaller `
   --onefile `
   --windowed `
+  --uac-admin `
   --name Kelpie `
   --icon (Join-Path $PSScriptRoot "kelpie_icon.ico") `
   --add-data "$(Join-Path $RepoSrc 'kelpie_icon.png');." `
