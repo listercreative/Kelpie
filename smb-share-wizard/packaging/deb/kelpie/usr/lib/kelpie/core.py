@@ -730,8 +730,31 @@ class SMBWizard:
         except Exception as e:
             print(f"[Windows] An unexpected error occurred: {e}")
 
+    @staticmethod
+    def _as_list(value):
+        # PowerShell's ConvertTo-Json collapses a single-element array/
+        # property down to a bare scalar (or omits it as $null) instead of
+        # a one-item array - normalize so callers can always iterate.
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
     def _list_shares_windows(self):
-        cmd = "Get-SmbShare | Select-Object Name,Path | ConvertTo-Json -Compress"
+        # One PowerShell process for every share (Get-SmbShareAccess) added
+        # up to a very visible multi-second stall as share count grew, since
+        # each powershell.exe launch (SMB cmdlets go through CIM, which is
+        # even slower) costs several hundred ms on its own. Do the whole
+        # per-share access lookup inside a single PowerShell invocation
+        # instead of one process per share.
+        cmd = (
+            "Get-SmbShare | Where-Object { $_.Name -notin @('ADMIN$','C$','IPC$','print$') } "
+            "| ForEach-Object { "
+            "[PSCustomObject]@{ Name = $_.Name; Path = $_.Path; "
+            "Access = (Get-SmbShareAccess -Name $_.Name | Select-Object -ExpandProperty AccountName) } "
+            "} | ConvertTo-Json -Compress -Depth 4"
+        )
         proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0 or not proc.stdout.strip():
             return []
@@ -741,38 +764,35 @@ class SMBWizard:
             return []
         if isinstance(data, dict):
             data = [data]
-        reserved = {"ADMIN$", "C$", "IPC$", "print$"}
-        shares = [
-            {"name": s["Name"], "path": s.get("Path", ""), "users": [], "group": None}
-            for s in data if s.get("Name") not in reserved
-        ]
-        # run_windows() only ever grants FullAccess to the one Kelpie-created
-        # group (individual users are members of it, not granted directly),
-        # so the share's access is entirely represented by that one group -
-        # same shape as the Linux/macOS "group" field.
-        for share in shares:
-            acc_cmd = (
-                f"Get-SmbShareAccess -Name '{self._ps_quote(share['name'])}' "
-                f"| Select-Object AccountName | ConvertTo-Json -Compress"
-            )
-            aproc = _run(["powershell", "-Command", acc_cmd], capture_output=True, text=True)
-            if aproc.returncode != 0 or not aproc.stdout.strip():
-                continue
-            try:
-                adata = json.loads(aproc.stdout)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(adata, dict):
-                adata = [adata]
-            for entry in adata:
-                account = entry.get("AccountName", "").split("\\")[-1]
-                if account.startswith("Kelpie_"):
-                    share["group"] = account
+
+        shares = []
+        for s in data:
+            share = {"name": s["Name"], "path": s.get("Path", ""), "users": [], "group": None}
+            # run_windows() only ever grants FullAccess to the one
+            # Kelpie-created group (individual users are members of it, not
+            # granted directly), so the share's access is entirely
+            # represented by that one group - same shape as the
+            # Linux/macOS "group" field.
+            for account in self._as_list(s.get("Access")):
+                name = account.split("\\")[-1]
+                if name.startswith("Kelpie_"):
+                    share["group"] = name
                     break
+            shares.append(share)
         return shares
 
     def _list_groups_windows(self):
-        cmd = "Get-LocalGroup | Where-Object { $_.Name -like 'Kelpie_*' } | Select-Object Name | ConvertTo-Json -Compress"
+        # Same fix as _list_shares_windows: one PowerShell process for the
+        # group list, one for every group's membership, plus a full second
+        # pass through _list_shares_windows()'s own per-share loop - batch
+        # groups+members into a single call, and reuse one shares fetch.
+        cmd = (
+            "Get-LocalGroup | Where-Object { $_.Name -like 'Kelpie_*' } "
+            "| ForEach-Object { "
+            "[PSCustomObject]@{ Name = $_.Name; "
+            "Members = (Get-LocalGroupMember -Group $_.Name | Select-Object -ExpandProperty Name) } "
+            "} | ConvertTo-Json -Compress -Depth 4"
+        )
         proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0 or not proc.stdout.strip():
             return []
@@ -783,9 +803,8 @@ class SMBWizard:
         if isinstance(data, dict):
             data = [data]
 
-        shares = self.list_shares()
         group_to_shares = {}
-        for share in shares:
+        for share in self._list_shares_windows():
             group = share.get("group")
             if group:
                 group_to_shares.setdefault(group, []).append(share["name"])
@@ -795,20 +814,7 @@ class SMBWizard:
             name = g.get("Name")
             if not name:
                 continue
-            members_cmd = (
-                f"Get-LocalGroupMember -Group '{self._ps_quote(name)}' "
-                f"| Select-Object Name | ConvertTo-Json -Compress"
-            )
-            mproc = _run(["powershell", "-Command", members_cmd], capture_output=True, text=True)
-            members = []
-            if mproc.returncode == 0 and mproc.stdout.strip():
-                try:
-                    mdata = json.loads(mproc.stdout)
-                    if isinstance(mdata, dict):
-                        mdata = [mdata]
-                    members = sorted(m.get("Name", "").split("\\")[-1] for m in mdata if m.get("Name"))
-                except json.JSONDecodeError:
-                    pass
+            members = sorted(m.split("\\")[-1] for m in self._as_list(g.get("Members")))
             groups.append({
                 "name": name,
                 "members": members,
