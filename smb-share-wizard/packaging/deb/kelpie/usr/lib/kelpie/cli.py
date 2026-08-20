@@ -29,7 +29,7 @@ class CLIWizard(SMBWizard):
         # Only ever offered right when a password was just set (share
         # creation / add user) - Kelpie never persists plaintext passwords,
         # so this can't be regenerated later for an existing user.
-        confirm = console.input("\nShow a LockNAS QR code for this user? [y/N] ").strip().lower()
+        confirm = console.input("\nShow a QR code for easy external configuration? [y/N] ").strip().lower()
         if confirm not in ('y', 'yes'):
             return
         try:
@@ -41,6 +41,7 @@ class CLIWizard(SMBWizard):
             "[bold red]Contains this user's password in plain sight - only display "
             "it somewhere private.[/bold red]"
         )
+        console.print("[dim](Compatible with the LockNAS app's bridge QR scanner.)[/dim]")
         payload = self.build_locknas_qr_payload(share_name, username, password)
         qr = qrcode.QRCode()
         qr.add_data(payload)
@@ -98,16 +99,10 @@ class CLIWizard(SMBWizard):
             return
         share = shares[idx]
 
-        has_users = bool(share.get("users"))
         print(f"\n--- {share['name']} ---")
         print("1. Add user")
-        if has_users:
-            print("2. Reset Password & Show QR (for an existing user)")
-            print("3. Delete share")
-            print("4. Back")
-        else:
-            print("2. Delete share")
-            print("3. Back")
+        print("2. Delete share")
+        print("3. Back")
         sub = input("Select an option: ").strip()
 
         if sub == '1':
@@ -121,34 +116,7 @@ class CLIWizard(SMBWizard):
                 self._offer_qr_code(share['name'], username, password)
             else:
                 print("Failed to add user (or elevation was cancelled).")
-        elif has_users and sub == '2':
-            # Same underlying operation as "Add user" above -
-            # grant_share_access resets the password when the user already
-            # exists - just re-targeting a user already on this share
-            # instead of a fresh one.
-            console.print(f"\n[yellow]{QR_PASSWORD_RESET_NOTE}[/yellow]\n")
-            users = share["users"]
-            if len(users) == 1:
-                username = users[0]["username"]
-            else:
-                print("   Users on this share:")
-                for i, u in enumerate(users):
-                    print(f"     {i}. {u['username']}")
-                uidx = input("   Reset password & show QR for which user number? ").strip()
-                if not uidx.isdigit() or not (0 <= int(uidx) < len(users)):
-                    print("Invalid user number.")
-                    return
-                username = users[int(uidx)]["username"]
-            password = getpass.getpass(f"   New password for {username} (replaces their current one): ")
-            if not password:
-                console.print("[red]Password cannot be empty.[/red]")
-                return
-            if self.grant_share_access(share['name'], username, password):
-                print(f"Reset '{username}''s password on share '{share['name']}'.")
-                self._offer_qr_code(share['name'], username, password)
-            else:
-                print("Failed to reset password (or elevation was cancelled).")
-        elif sub == ('3' if has_users else '2'):
+        elif sub == '2':
             if self.remove_share(share['name']):
                 print(f"Removed share: {share['name']}")
             else:
@@ -188,6 +156,7 @@ class CLIWizard(SMBWizard):
             print("a<n> = assign to a(nother) group")
             print("g<n> = remove from a group")
             print("r<n> = revoke access to a share")
+            print("q<n> = reset password & show QR code")
             print("d<n> = delete the user entirely")
             choice = input("Select an option, or press Enter to return: ").strip().lower()
             if not choice:
@@ -212,7 +181,7 @@ class CLIWizard(SMBWizard):
                 continue
 
             kind, rest = choice[0], choice[1:]
-            if kind not in ('a', 'g', 'r', 'd') or not rest.isdigit() or not (0 <= int(rest) < len(users)):
+            if kind not in ('a', 'g', 'r', 'q', 'd') or not rest.isdigit() or not (0 <= int(rest) < len(users)):
                 print("Invalid option.")
                 continue
             user = users[int(rest)]
@@ -266,6 +235,36 @@ class CLIWizard(SMBWizard):
                     print(f"Revoked '{user['username']}''s access to '{share_name}'.")
                 else:
                     print("Failed to revoke access (or elevation was cancelled).")
+            elif kind == 'q':
+                if not user["shares"]:
+                    print(f"'{user['username']}' has no share access to generate a QR code for.")
+                    continue
+                # Same underlying operation "Add user" performs when the
+                # user already exists - grant_share_access resets the
+                # password rather than failing.
+                console.print(f"\n[yellow]{QR_PASSWORD_RESET_NOTE}[/yellow]\n")
+                if len(user["shares"]) == 1:
+                    share_name = user["shares"][0]
+                else:
+                    print("Shares:")
+                    for si, sname in enumerate(user["shares"]):
+                        print(f"  {si}. {sname}")
+                    sidx = input("Reset password & show QR code for which share number? ").strip()
+                    if not sidx.isdigit() or not (0 <= int(sidx) < len(user["shares"])):
+                        print("Invalid share number.")
+                        continue
+                    share_name = user["shares"][int(sidx)]
+                password = getpass.getpass(
+                    f"   New password for {user['username']} (replaces their current one): "
+                )
+                if not password:
+                    console.print("[red]Password cannot be empty.[/red]")
+                    continue
+                if self.grant_share_access(share_name, user['username'], password):
+                    print(f"Reset '{user['username']}''s password on share '{share_name}'.")
+                    self._offer_qr_code(share_name, user['username'], password)
+                else:
+                    print("Failed to reset password (or elevation was cancelled).")
             else:
                 confirm = input(f"Delete user '{user['username']}' entirely? [y/N] ").strip().lower()
                 if confirm not in ('y', 'yes'):

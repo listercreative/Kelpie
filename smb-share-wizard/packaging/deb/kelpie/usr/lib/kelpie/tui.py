@@ -221,7 +221,7 @@ class TUIWizard:
         # already torn down - see run()) - only ever offered right when a
         # password was just set, since Kelpie never persists plaintext
         # passwords and so has no way to regenerate this later.
-        confirm = input(f"\nShow a LockNAS QR code for '{username}'? [y/N] ").strip().lower()
+        confirm = input(f"\nShow a QR code for '{username}' for easy external configuration? [y/N] ").strip().lower()
         if confirm not in ('y', 'yes'):
             return
         try:
@@ -229,7 +229,8 @@ class TUIWizard:
         except ImportError:
             print("The 'qrcode' package isn't installed.")
             return
-        print("Contains this user's password in plain sight - only display it somewhere private.\n")
+        print("Contains this user's password in plain sight - only display it somewhere private.")
+        print("(Compatible with the LockNAS app's bridge QR scanner.)\n")
         payload = self.wizard.build_locknas_qr_payload(share_name, username, password)
         qr = qrcode.QRCode()
         qr.add_data(payload)
@@ -239,7 +240,7 @@ class TUIWizard:
 
     def _offer_qr_codes_in_curses(self, stdscr, share_name, users):
         for user in users:
-            choice = self._menu(stdscr, f"LockNAS QR - {user['username']}", ["Show QR code", "Skip"])
+            choice = self._menu(stdscr, f"QR Code - {user['username']}", ["Show QR code", "Skip"])
             if choice == 0:
                 self._show_qr_in_terminal(stdscr, share_name, user["username"], user["password"])
 
@@ -251,14 +252,15 @@ class TUIWizard:
         # needs to happen outside curses.
         curses.endwin()
         try:
-            print(f"\n--- LockNAS QR code for '{username}' ---")
+            print(f"\n--- QR code for '{username}' ---")
             try:
                 import qrcode
             except ImportError:
                 print("The 'qrcode' package isn't installed.")
                 input("\nPress Enter to continue...")
                 return
-            print("Contains this user's password in plain sight - only display it somewhere private.\n")
+            print("Contains this user's password in plain sight - only display it somewhere private.")
+            print("(Compatible with the LockNAS app's bridge QR scanner.)\n")
             payload = self.wizard.build_locknas_qr_payload(share_name, username, password)
             qr = qrcode.QRCode()
             qr.add_data(payload)
@@ -866,10 +868,7 @@ class TUIWizard:
                 return None
             share = shares[idx]
 
-            sub_options = ["Add user"]
-            if share.get("users"):
-                sub_options.append("Reset Password & Show QR")
-            sub_options.append("Delete share")
+            sub_options = ["Add user", "Delete share"]
             sub_idx = self._menu(stdscr, share['name'], sub_options, subtitle=share.get('path', ''))
             if sub_idx is None:
                 continue
@@ -877,29 +876,6 @@ class TUIWizard:
 
             if choice == "Delete share":
                 action = {"action": "delete", "name": share['name']}
-            elif choice == "Reset Password & Show QR":
-                # Same underlying operation as "Add user" - grant_share_access
-                # resets the password when the user already exists - just
-                # re-targeting a user already on this share instead of a
-                # fresh one. See QR_PASSWORD_RESET_NOTE for why this is a
-                # reset rather than a lookup: it's a structural limitation
-                # of SMB/Samba/Windows, not a Kelpie shortcoming, and Kelpie
-                # itself never saves any username/password information.
-                self._message(stdscr, QR_PASSWORD_RESET_NOTE)
-                existing_users = [u["username"] for u in share["users"]]
-                if len(existing_users) == 1:
-                    username = existing_users[0]
-                else:
-                    uidx = self._menu(stdscr, "Reset password & show QR for which user?", existing_users)
-                    if uidx is None:
-                        continue
-                    username = existing_users[uidx]
-                password = self._text_input(
-                    stdscr, f"New password for {username}\n(replaces their current one):", password=True
-                )
-                if not password:
-                    continue
-                action = {"action": "add_user", "share": share['name'], "username": username, "password": password}
             else:
                 username = self._pick_or_type_username(stdscr)
                 if not username:
@@ -1012,6 +988,7 @@ class TUIWizard:
             sub_options.append("Remove from group")
         if user["shares"]:
             sub_options.append("Revoke share access")
+            sub_options.append("Reset Password & Show QR")
         sub_options.append("Delete user")
         sub_idx = self._menu(
             stdscr, user["username"], sub_options,
@@ -1021,7 +998,46 @@ class TUIWizard:
             return None
         choice = sub_options[sub_idx]
 
-        if choice == "Assign to group":
+        if choice == "Reset Password & Show QR":
+            # Same underlying operation "Add user" (on the share side)
+            # performs when the user already exists - grant_share_access
+            # resets the password rather than failing. See
+            # QR_PASSWORD_RESET_NOTE for why this is a reset, not a lookup:
+            # a structural limitation of SMB/Samba/Windows, not a Kelpie
+            # shortcoming, and Kelpie itself never saves any
+            # username/password information.
+            self._message(stdscr, QR_PASSWORD_RESET_NOTE)
+            if len(user["shares"]) == 1:
+                share_name = user["shares"][0]
+            else:
+                sidx = self._menu(stdscr, "Reset password & show QR for which share?", user["shares"])
+                if sidx is None:
+                    return None
+                share_name = user["shares"][sidx]
+            password = self._text_input(
+                stdscr, f"New password for {user['username']}\n(replaces their current one):", password=True
+            )
+            if not password:
+                return None
+            action = {
+                "action": "add_user", "share": share_name, "username": user["username"], "password": password
+            }
+            if self.wizard.elevation_needs_terminal():
+                return action
+            self._run_privileged_action(
+                stdscr, f"Resetting '{user['username']}''s password on '{share_name}'...",
+                lambda: self._add_user_in_curses(action)
+            )
+            if any(
+                user["username"] in [u["username"] for u in s.get("users", [])]
+                for s in self.wizard.list_shares() if s["name"] == share_name
+            ):
+                self._offer_qr_codes_in_curses(
+                    stdscr, share_name, [{"username": user["username"], "password": password}]
+                )
+            return None
+
+        elif choice == "Assign to group":
             groups = self.wizard.list_groups()
             if not groups:
                 self._message(stdscr, "No groups exist to assign to.")

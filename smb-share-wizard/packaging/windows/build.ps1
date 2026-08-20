@@ -35,6 +35,11 @@ $RepoSrc = Resolve-Path (Join-Path $PSScriptRoot "..\..\src")
 python -m pip install --upgrade pip
 python -m pip install pyinstaller rich "qrcode[pil]"
 
+# --collect-all=PIL: Pillow registers its image codecs (PNG included) by
+# dynamically scanning and importing its own package at runtime
+# (PIL.Image.init()) - invisible to PyInstaller's static import analysis,
+# so without this the QR feature's PNG save silently fails and leaves a
+# blank dialog on screen instead of a visible error.
 pyinstaller `
   --onefile `
   --windowed `
@@ -45,6 +50,7 @@ pyinstaller `
   --hidden-import=core --hidden-import=cli --hidden-import=gui --hidden-import=tui `
   --collect-all=rich `
   --collect-all=qrcode `
+  --collect-all=PIL `
   --distpath $PSScriptRoot `
   --workpath (Join-Path $PSScriptRoot "build") `
   --specpath (Join-Path $PSScriptRoot "build") `

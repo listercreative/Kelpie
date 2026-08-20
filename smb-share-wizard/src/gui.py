@@ -112,30 +112,42 @@ class QrCodeDialog(tk.Toplevel):
     for an existing user from a "Manage Shares" style screen."""
     def __init__(self, parent, share_name, username, payload):
         super().__init__(parent)
-        self.title(f"LockNAS QR - {username}")
+        self.title(f"QR Code - {username}")
         self.resizable(False, False)
         self.transient(parent)
 
-        import qrcode
-        img = qrcode.make(payload)
-        fd, png_path = tempfile.mkstemp(suffix=".png")
-        os.close(fd)
         try:
-            img.save(png_path)
-            # Keep a reference on self - PhotoImage has no strong reference
-            # of its own, and Tk garbage-collects it out from under the
-            # Label the instant nothing else in Python still points to it.
-            self._photo = tk.PhotoImage(file=png_path)
-        finally:
+            import qrcode
+            img = qrcode.make(payload)
+            fd, png_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
             try:
-                os.remove(png_path)
-            except Exception:
-                pass
+                img.save(png_path)
+                # Keep a reference on self - PhotoImage has no strong
+                # reference of its own, and Tk garbage-collects it out from
+                # under the Label the instant nothing else in Python still
+                # points to it.
+                self._photo = tk.PhotoImage(file=png_path)
+            finally:
+                try:
+                    os.remove(png_path)
+                except Exception:
+                    pass
+        except Exception as e:
+            # Without this, a failure here (e.g. a missing/incompletely
+            # bundled Pillow codec) left a blank, empty Toplevel on screen -
+            # the window itself is already created by this point (title set
+            # above), but nothing was ever packed into it - instead of a
+            # clear error.
+            self.destroy()
+            messagebox.showerror("QR code unavailable", f"Couldn't generate the QR code: {e}", parent=parent)
+            return
 
         ttk.Label(
-            self, text=f"Scan with LockNAS to add '{share_name}' as {username}", padding=8
+            self, text=f"Scan for easy external configuration of '{share_name}' as {username}", padding=8
         ).pack()
         ttk.Label(self, image=self._photo).pack(padx=12, pady=4)
+        ttk.Label(self, text="Compatible with the LockNAS app's bridge QR scanner.", padding=(8, 0)).pack()
         ttk.Label(
             self,
             text="Contains this user's password in plain sight - don't leave it\n"
@@ -286,9 +298,6 @@ class GUIWizard:
         btn_frame.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(btn_frame, text="Refresh", command=self._refresh_manage_list).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Add User...", command=self._add_user_to_selected_share).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Reset Password & Show QR...", command=self._show_qr_for_selected_share).pack(
-            side="left", padx=4
-        )
         ttk.Button(btn_frame, text="Delete Selected", command=self._delete_selected_share).pack(side="left", padx=4)
 
     def _build_users_groups_tab(self):
@@ -340,6 +349,9 @@ class GUIWizard:
         ttk.Button(users_btn_frame, text="Revoke Access...", command=self._revoke_selected_user_access).pack(
             side="left", padx=4
         )
+        ttk.Button(
+            users_btn_frame, text="Reset Password & Show QR...", command=self._reset_password_for_selected_user
+        ).pack(side="left", padx=4)
         ttk.Button(users_btn_frame, text="Delete User", command=self._delete_selected_user).pack(
             side="left", padx=4
         )
@@ -461,38 +473,37 @@ class GUIWizard:
             target=self._grant_access_worker, args=(share_name, username, password), daemon=True
         ).start()
 
-    def _show_qr_for_selected_share(self):
+    def _reset_password_for_selected_user(self):
         # Passwords are stored as hashes everywhere (Samba, Windows, macOS)
         # - there's no way to retrieve an existing user's current password
         # to encode. The only honest way to show a QR for an
         # already-existing user is to reset it and encode the new one -
-        # same underlying operation _add_user_to_selected_share does above,
-        # so this reuses the same worker/QR-offer path, just re-targeting a
-        # user already on the share instead of a fresh one.
-        selection = self.shares_list.selection()
-        if not selection:
-            messagebox.showinfo("Reset Password & Show QR", "Select a share first.")
+        # same underlying operation _add_user_to_selected_share uses, so
+        # this reuses the same worker/QR-offer path, just starting from the
+        # user's own screen instead of a share's.
+        username = self._selected_top_level_text(self.system_users_list)
+        if not username:
+            messagebox.showinfo("Reset Password & Show QR", "Select a user first.")
             return
-        share_name = self.shares_list.item(selection[0], "values")[0]
-        share = next((s for s in self.wizard.list_shares() if s["name"] == share_name), None)
-        users = share.get("users", []) if share else []
-        if not users:
-            messagebox.showinfo("Reset Password & Show QR", f"'{share_name}' has no users yet — add one first.")
+        user = next((u for u in self.wizard.list_users() if u["username"] == username), None)
+        shares = user.get("shares", []) if user else []
+        if not shares:
+            messagebox.showinfo("Reset Password & Show QR", f"'{username}' doesn't have access to any share yet.")
             return
 
         if not messagebox.askokcancel("Reset Password & Show QR", QR_PASSWORD_RESET_NOTE):
             return
 
-        if len(users) == 1:
-            username = users[0]["username"]
+        if len(shares) == 1:
+            share_name = shares[0]
         else:
             dialog = ChoiceDialog(
-                self.root, "Choose user", "Reset password & show QR code for which user?",
-                [u["username"] for u in users], ok_label="Next"
+                self.root, "Choose share", "Reset password & show QR code for which share?",
+                shares, ok_label="Next"
             )
             if not dialog.result:
                 return
-            username = dialog.result
+            share_name = dialog.result
 
         from tkinter import simpledialog
         password = simpledialog.askstring(
@@ -878,8 +889,8 @@ class GUIWizard:
         # user), since Kelpie never persists plaintext passwords and so has
         # no way to regenerate this later for an existing user.
         if not messagebox.askyesno(
-            "LockNAS QR Code",
-            "Show a QR code so a LockNAS phone can scan and auto-configure this share?\n\n"
+            "QR Code",
+            "Show a QR code for easy external configuration of this share?\n\n"
             "The code contains this user's password in plain sight - only display it "
             "somewhere private."
         ):
@@ -899,7 +910,7 @@ class GUIWizard:
             payload = self.wizard.build_locknas_qr_payload(share_name, user["username"], user["password"])
             QrCodeDialog(self.root, share_name, user["username"], payload)
             remaining = [u for u in remaining if u is not user]
-            if remaining and not messagebox.askyesno("LockNAS QR Code", "Show another user's QR code?"):
+            if remaining and not messagebox.askyesno("QR Code", "Show another user's QR code?"):
                 return
 
 
