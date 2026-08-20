@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Kelpie
 Comment=Create and manage SMB (Samba) shares
-Exec=kelpie
+Exec=kelpie --gui
 Icon=kelpie
 StartupWMClass=Kelpie
 Terminal=false
