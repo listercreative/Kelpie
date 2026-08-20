@@ -215,10 +215,13 @@ class SMBWizard:
         return []
 
     def list_users(self):
-        # Every user tied to a share (via valid users) or a Kelpie-managed
-        # group, each annotated with what that access actually is - derived
-        # entirely from list_shares()/list_groups(), so it can't drift from
-        # them.
+        # Every regular user account, not just ones already tied to a share
+        # or group - otherwise a user with no access yet (or one just
+        # removed from their last share/group) would simply disappear from
+        # view instead of being visible to assign. Samba's own user
+        # database (passdb.tdb) is root-only and can't be queried
+        # unprivileged just to populate a list, so this reads the OS
+        # account list instead - see _list_regular_usernames().
         shares = self.list_shares()
         groups = self.list_groups()
 
@@ -232,15 +235,41 @@ class SMBWizard:
             for member in g["members"]:
                 user_groups.setdefault(member, set()).add(g["name"])
 
-        usernames = sorted(set(user_shares) | set(user_groups))
+        usernames = set(user_shares) | set(user_groups) | self._list_regular_usernames()
         return [
             {
                 "username": u,
                 "shares": sorted(user_shares.get(u, set())),
                 "groups": sorted(user_groups.get(u, set())),
             }
-            for u in usernames
+            for u in sorted(usernames)
         ]
+
+    def _list_regular_usernames(self):
+        # Regular (non-system/service) local accounts, platform-appropriate:
+        # Ubuntu/Debian's useradd defaults to UID_MIN=1000; macOS's regular
+        # accounts start at 501 (Apple's own convention, distinct from
+        # Linux's). This is what Kelpie's own _configure_linux_user/
+        # _configure_macos_user create accounts as, so it naturally includes
+        # every user Kelpie could plausibly manage.
+        if self.system in ("Linux", "Darwin"):
+            import pwd
+            min_uid = 1000 if self.system == "Linux" else 500
+            return {p.pw_name for p in pwd.getpwall() if min_uid <= p.pw_uid < 65534}
+        elif self.system == "Windows":
+            cmd = "Get-LocalUser | Select-Object Name | ConvertTo-Json -Compress"
+            proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return set()
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                return set()
+            if isinstance(data, dict):
+                data = [data]
+            builtin = {"Administrator", "Guest", "DefaultAccount", "WDAGUtilityAccount"}
+            return {d["Name"] for d in data if d.get("Name") not in builtin}
+        return set()
 
     def _list_groups_posix(self):
         import grp
@@ -1114,6 +1143,11 @@ class SMBWizard:
             print(f"[Linux] An unexpected error occurred: {e}")
 
     _RESERVED_SMB_SECTIONS = {"global", "printers", "print$", "homes", "netlogon", "profiles"}
+    # See _rewrite_valid_users: written in place of a genuinely empty "valid
+    # users" list, since Samba treats that as unset (no restriction at all)
+    # rather than "nobody". Filtered back out wherever shares are read, so
+    # it never surfaces as a phantom user in the UI.
+    _NO_USERS_PLACEHOLDER = "__no_users__"
 
     def _list_shares_linux(self):
         smb_conf = "/etc/samba/smb.conf"
@@ -1143,7 +1177,9 @@ class SMBWizard:
                 if key == 'path':
                     current["path"] = value
                 elif key == 'valid users':
-                    current["users"] = [{"username": u} for u in value.split()]
+                    current["users"] = [
+                        {"username": u} for u in value.split() if u != self._NO_USERS_PLACEHOLDER
+                    ]
         flush()
         for share in shares:
             share["group"] = self._group_for_path(share.get("path"))
@@ -1207,7 +1243,17 @@ class SMBWizard:
                 bare = stripped.split('#', 1)[0].split(';', 1)[0].strip()
                 if '=' in bare and bare.split('=', 1)[0].strip().lower() == 'valid users':
                     existing = bare.split('=', 1)[1].split()
-                    out.append(f"    valid users = {' '.join(mutate(existing))}\n")
+                    new_users = mutate(existing)
+                    if not new_users:
+                        # A "valid users" line with nothing after it is not
+                        # the same as "nobody can access this" - Samba
+                        # treats an empty/absent value as unset, which means
+                        # NO restriction: every Samba user on the box, not
+                        # just none of them. Keep the share genuinely
+                        # inaccessible with an unmatchable placeholder
+                        # instead of accidentally opening it to everyone.
+                        new_users = [self._NO_USERS_PLACEHOLDER]
+                    out.append(f"    valid users = {' '.join(new_users)}\n")
                     updated = True
                     continue
             out.append(raw_line)
@@ -1216,7 +1262,10 @@ class SMBWizard:
             f.writelines(out)
 
     def _add_valid_user_to_smb_conf(self, share_name, username):
-        self._rewrite_valid_users(share_name, lambda users: users if username in users else users + [username])
+        def mutate(users):
+            users = [u for u in users if u != self._NO_USERS_PLACEHOLDER]
+            return users if username in users else users + [username]
+        self._rewrite_valid_users(share_name, mutate)
 
     def _remove_valid_user_from_smb_conf(self, share_name, username):
         self._rewrite_valid_users(share_name, lambda users: [u for u in users if u != username])

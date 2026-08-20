@@ -9,6 +9,22 @@ console = Console()
 
 
 class CLIWizard(SMBWizard):
+    def _pick_or_type_username(self, prompt="   Username: "):
+        # Existing usernames one selection away (no risk of a typo against a
+        # name that already exists), but typing a new one still works -
+        # this can create a brand-new user, unlike group membership which
+        # requires an existing one.
+        users = self.list_users()
+        if not users:
+            return console.input(prompt).strip()
+        print("   Existing users:")
+        for i, u in enumerate(users):
+            print(f"     {i}. {u['username']}")
+        raw = console.input(f"{prompt}(number to pick existing, or type new): ").strip()
+        if raw.isdigit() and int(raw) < len(users):
+            return users[int(raw)]['username']
+        return raw
+
     def collect_user_input(self):
         console.print(Panel("[bold blue]New SMB Share Creation[/bold blue]", expand=False))
 
@@ -32,7 +48,7 @@ class CLIWizard(SMBWizard):
         console.print("\n[bold]3. User Configuration (Enter username, then password. Empty username to finish)[/bold]")
         self.users = []
         while True:
-            username = console.input("   Username: ").strip()
+            username = self._pick_or_type_username()
             if not username: break
             password = getpass.getpass(f"   Password for {username}: ")
             self.users.append({'username': username, 'password': password})
@@ -70,7 +86,7 @@ class CLIWizard(SMBWizard):
         sub = input("Select an option: ").strip()
 
         if sub == '1':
-            username = console.input("   Username: ").strip()
+            username = self._pick_or_type_username()
             if not username:
                 console.print("[red]Username cannot be empty.[/red]")
                 return
@@ -217,10 +233,23 @@ class CLIWizard(SMBWizard):
             group = groups[int(rest)]
 
             if kind == 'm':
-                username = console.input("   Username to add: ").strip()
-                if not username:
-                    console.print("[red]Username cannot be empty.[/red]")
+                # A pick-list of existing users, not free text: adding a
+                # member requires an already-existing account (unlike a
+                # share's "Add user", which can create one) - the underlying
+                # action validates and refuses otherwise, so free text here
+                # could only ever fail.
+                users = self.list_users()
+                if not users:
+                    print("No existing users to add. Create one via a share's 'Add user' first.")
                     continue
+                print("Users:")
+                for ui, u in enumerate(users):
+                    print(f"  {ui}. {u['username']}")
+                uidx = input("Which user number to add? ").strip()
+                if not uidx.isdigit() or not (0 <= int(uidx) < len(users)):
+                    print("Invalid user number.")
+                    continue
+                username = users[int(uidx)]['username']
                 if self.assign_user_to_group(username, group['name']):
                     print(f"Added '{username}' to group '{group['name']}'.")
                 else:

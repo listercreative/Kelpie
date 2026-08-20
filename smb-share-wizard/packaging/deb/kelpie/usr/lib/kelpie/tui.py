@@ -412,39 +412,25 @@ class TUIWizard:
                         lambda: self._apply_in_curses(share_data)
                     )
             elif selected == "Manage Existing Shares":
+                # _manage_shares_flow only returns non-None when the action
+                # genuinely needs the terminal (see its docstring) - the
+                # fast in-curses path already applied and looped internally.
                 action = self._manage_shares_flow(stdscr)
-                if action and self.wizard.elevation_needs_terminal():
+                if action:
                     if action["action"] == "delete":
                         result["delete_share"] = action["name"]
                     elif action["action"] == "add_user":
                         result["add_user"] = action
                     return
-                elif action and action["action"] == "delete":
-                    self._run_privileged_action(
-                        stdscr, f"Removing share '{action['name']}'...",
-                        lambda: self._delete_in_curses(action["name"])
-                    )
-                elif action and action["action"] == "add_user":
-                    self._run_privileged_action(
-                        stdscr, f"Adding '{action['username']}' to '{action['share']}'...",
-                        lambda: self._add_user_in_curses(action)
-                    )
             elif selected == "Manage Users & Groups":
+                # _users_groups_flow only returns non-None when the action
+                # genuinely needs the terminal - the fast in-curses path
+                # (via _apply_or_bubble) already applied and looped
+                # internally.
                 action = self._users_groups_flow(stdscr)
-                if action and self.wizard.elevation_needs_terminal():
+                if action:
                     result["users_groups_action"] = action
                     return
-                elif action:
-                    busy = {
-                        "revoke_access": f"Revoking access to '{action.get('share')}'...",
-                        "delete_user": f"Deleting user '{action.get('username')}'...",
-                        "delete_group": f"Deleting group '{action.get('name')}'...",
-                        "assign_group": f"Adding '{action.get('username')}' to '{action.get('group')}'...",
-                        "revoke_group": f"Removing '{action.get('username')}' from '{action.get('group')}'...",
-                    }.get(action["action"], "Working...")
-                    self._run_privileged_action(
-                        stdscr, busy, lambda: self._users_groups_action_in_curses(action)
-                    )
             elif selected == "Launch Desktop UI":
                 result["launch_gui"] = True
                 return
@@ -714,6 +700,22 @@ class TUIWizard:
 
     # ---- create-share flow ----
 
+    def _pick_or_type_username(self, stdscr, title="Username:"):
+        # Existing usernames one click away (no risk of a typo against a
+        # name that already exists), but typing a new one still works -
+        # this can create a brand-new user, unlike group membership which
+        # requires an existing one. Skips straight to free text if there's
+        # nothing to pick from yet.
+        existing = [u["username"] for u in self.wizard.list_users()]
+        if existing:
+            options = existing + ["+ New user..."]
+            idx = self._menu(stdscr, title, options, subtitle="Pick an existing user, or add a new one")
+            if idx is None:
+                return None
+            if idx < len(existing):
+                return existing[idx]
+        return self._text_input(stdscr, title)
+
     def _manage_users(self, stdscr):
         users = []
         while True:
@@ -722,7 +724,7 @@ class TUIWizard:
             if idx is None or idx == len(options) - 1:
                 return users
             if idx == len(options) - 2:
-                username = self._text_input(stdscr, "Username:")
+                username = self._pick_or_type_username(stdscr)
                 if not username:
                     continue
                 password = self._text_input(stdscr, f"Password for {username}:", password=True)
@@ -766,34 +768,59 @@ class TUIWizard:
         return {"name": name, "path": path, "users": users}
 
     def _manage_shares_flow(self, stdscr):
-        # Returns an action dict ({"action": "delete", "name": ...} or
-        # {"action": "add_user", "share": ..., "username": ..., "password": ...})
-        # to be applied outside curses (it may need an elevation prompt), or
-        # None if the user backed out.
-        shares = self.wizard.list_shares()
-        if not shares:
-            self._message(stdscr, "No existing shares found.")
-            return None
-        options = [f"{s['name']}  ({s.get('path', 'Unknown')})" for s in shares]
-        idx = self._menu(stdscr, "Manage Shares", options, subtitle="Select a share to manage")
-        if idx is None:
-            return None
-        share = shares[idx]
+        # Returns an action dict to be applied outside curses, but only when
+        # elevation_needs_terminal() is True. Otherwise the action is
+        # applied right here and this loops back to the (refreshed) share
+        # list, instead of bubbling out to the main menu after every single
+        # action. Returns None once the user backs all the way out (Esc/q).
+        while True:
+            shares = self.wizard.list_shares()
+            if not shares:
+                self._message(stdscr, "No existing shares found.")
+                return None
+            items = [
+                (
+                    s["name"],
+                    [f"path: {s.get('path', 'Unknown')}"]
+                    + [f"user: {u['username']}" for u in s.get("users", [])],
+                )
+                for s in shares
+            ]
+            idx = self._tree_menu(stdscr, "Manage Shares", items, subtitle="Select a share to manage")
+            if idx is None:
+                return None
+            share = shares[idx]
 
-        sub_options = ["Add user", "Delete share"]
-        sub_idx = self._menu(stdscr, share['name'], sub_options, subtitle=share.get('path', ''))
-        if sub_idx is None:
-            return None
-        if sub_options[sub_idx] == "Delete share":
-            return {"action": "delete", "name": share['name']}
+            sub_options = ["Add user", "Delete share"]
+            sub_idx = self._menu(stdscr, share['name'], sub_options, subtitle=share.get('path', ''))
+            if sub_idx is None:
+                continue
 
-        username = self._text_input(stdscr, "Username:")
-        if not username:
-            return None
-        password = self._text_input(stdscr, f"Password for {username}:", password=True)
-        if not password:
-            return None
-        return {"action": "add_user", "share": share['name'], "username": username, "password": password}
+            if sub_options[sub_idx] == "Delete share":
+                action = {"action": "delete", "name": share['name']}
+            else:
+                username = self._pick_or_type_username(stdscr)
+                if not username:
+                    continue
+                password = self._text_input(stdscr, f"Password for {username}:", password=True)
+                if not password:
+                    continue
+                action = {"action": "add_user", "share": share['name'], "username": username, "password": password}
+
+            if self.wizard.elevation_needs_terminal():
+                return action
+
+            if action["action"] == "delete":
+                self._run_privileged_action(
+                    stdscr, f"Removing share '{action['name']}'...",
+                    lambda: self._delete_in_curses(action["name"])
+                )
+            else:
+                self._run_privileged_action(
+                    stdscr, f"Adding '{action['username']}' to '{action['share']}'...",
+                    lambda: self._add_user_in_curses(action)
+                )
+            # loop back and show the (refreshed) share list again
 
     def _users_groups_flow(self, stdscr):
         # Returns an action dict to apply outside curses (revoke_access /
@@ -852,6 +879,10 @@ class TUIWizard:
             # otherwise back out of the submenu - show this screen again
 
     def _manage_user_flow(self, stdscr, user):
+        # Returns an action dict only when it genuinely needs the terminal
+        # (see elevation_needs_terminal()) - otherwise applies it right here
+        # and returns None, same as backing out, so the caller's loop just
+        # re-shows the (refreshed) list instead of bubbling to the main menu.
         sub_options = ["Assign to group"]
         if user["groups"]:
             sub_options.append("Remove from group")
@@ -875,26 +906,31 @@ class TUIWizard:
             gidx = self._menu(stdscr, "Assign to which group?", group_options)
             if gidx is None:
                 return None
-            return {"action": "assign_group", "username": user["username"], "group": group_options[gidx]}
+            action = {"action": "assign_group", "username": user["username"], "group": group_options[gidx]}
 
-        if choice == "Remove from group":
+        elif choice == "Remove from group":
             gidx = self._menu(stdscr, "Remove from which group?", user["groups"])
             if gidx is None:
                 return None
-            return {"action": "revoke_group", "username": user["username"], "group": user["groups"][gidx]}
+            action = {"action": "revoke_group", "username": user["username"], "group": user["groups"][gidx]}
 
-        if choice == "Revoke share access":
+        elif choice == "Revoke share access":
             sidx = self._menu(stdscr, "Revoke access to which share?", user["shares"])
             if sidx is None:
                 return None
-            return {"action": "revoke_access", "share": user["shares"][sidx], "username": user["username"]}
+            action = {"action": "revoke_access", "share": user["shares"][sidx], "username": user["username"]}
 
-        confirm = self._menu(stdscr, f"Delete user '{user['username']}'?", ["Yes, delete", "Cancel"])
-        if confirm == 0:
-            return {"action": "delete_user", "username": user["username"]}
-        return None
+        else:
+            confirm = self._menu(stdscr, f"Delete user '{user['username']}'?", ["Yes, delete", "Cancel"])
+            if confirm != 0:
+                return None
+            action = {"action": "delete_user", "username": user["username"]}
+
+        return self._apply_or_bubble(stdscr, action)
 
     def _manage_group_flow(self, stdscr, group):
+        # Same contract as _manage_user_flow: only returns non-None when
+        # elevation genuinely needs the terminal.
         sub_options = ["Add member"]
         if group["members"]:
             sub_options.append("Remove member")
@@ -908,20 +944,50 @@ class TUIWizard:
         choice = sub_options[sub_idx]
 
         if choice == "Add member":
-            username = self._text_input(stdscr, "Username to add:")
-            if not username:
+            # A pick-list of existing users, not free text: adding a member
+            # requires an already-existing account (unlike a share's "Add
+            # user", which can create one) - the underlying action validates
+            # and refuses otherwise, so free text here could only ever fail.
+            usernames = [u["username"] for u in self.wizard.list_users()]
+            if not usernames:
+                self._message(stdscr, "No existing users to add. Create one via a share's 'Add user' first.")
                 return None
-            return {"action": "assign_group", "username": username, "group": group["name"]}
+            uidx = self._menu(stdscr, f"Add which user to '{group['name']}'?", usernames)
+            if uidx is None:
+                return None
+            action = {"action": "assign_group", "username": usernames[uidx], "group": group["name"]}
 
-        if choice == "Remove member":
+        elif choice == "Remove member":
             midx = self._menu(stdscr, "Remove which member?", group["members"])
             if midx is None:
                 return None
-            return {"action": "revoke_group", "username": group["members"][midx], "group": group["name"]}
+            action = {"action": "revoke_group", "username": group["members"][midx], "group": group["name"]}
 
-        confirm = self._menu(stdscr, f"Delete group '{group['name']}'?", ["Yes, delete", "Cancel"])
-        if confirm == 0:
-            return {"action": "delete_group", "name": group["name"]}
+        else:
+            confirm = self._menu(stdscr, f"Delete group '{group['name']}'?", ["Yes, delete", "Cancel"])
+            if confirm != 0:
+                return None
+            action = {"action": "delete_group", "name": group["name"]}
+
+        return self._apply_or_bubble(stdscr, action)
+
+    def _apply_or_bubble(self, stdscr, action):
+        # Shared by _manage_user_flow/_manage_group_flow: returns the action
+        # dict when elevation needs the terminal (the caller bubbles it up
+        # to run(), which applies it outside curses), otherwise applies it
+        # right here in-curses and returns None - same as backing out, so
+        # the caller's own loop just re-shows the refreshed list instead of
+        # bubbling all the way to the main menu.
+        if self.wizard.elevation_needs_terminal():
+            return action
+        busy = {
+            "revoke_access": f"Revoking access to '{action.get('share')}'...",
+            "delete_user": f"Deleting user '{action.get('username')}'...",
+            "delete_group": f"Deleting group '{action.get('name')}'...",
+            "assign_group": f"Adding '{action.get('username')}' to '{action.get('group')}'...",
+            "revoke_group": f"Removing '{action.get('username')}' from '{action.get('group')}'...",
+        }.get(action["action"], "Working...")
+        self._run_privileged_action(stdscr, busy, lambda: self._users_groups_action_in_curses(action))
         return None
 
 

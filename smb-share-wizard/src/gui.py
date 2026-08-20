@@ -10,15 +10,21 @@ from core import SMBWizard
 
 
 class AddUserDialog(tk.Toplevel):
-    def __init__(self, parent):
+    def __init__(self, parent, existing_usernames=()):
         super().__init__(parent)
         self.title("Add User")
         self.resizable(False, False)
         self.transient(parent)
         self.result = None
 
+        # Editable combobox, not a plain Entry: existing usernames are one
+        # click away (no risk of a typo against a name that already
+        # exists), but typing a name that isn't in the list still works -
+        # this can create a brand-new user, unlike group membership which
+        # requires an existing one.
         ttk.Label(self, text="Username:").grid(row=0, column=0, sticky="e", padx=8, pady=6)
-        self.username_entry = ttk.Entry(self)
+        self.username_var = tk.StringVar()
+        self.username_entry = ttk.Combobox(self, textvariable=self.username_var, values=list(existing_usernames))
         self.username_entry.grid(row=0, column=1, padx=8, pady=6)
 
         ttk.Label(self, text="Password:").grid(row=1, column=0, sticky="e", padx=8, pady=6)
@@ -82,39 +88,6 @@ class ChoiceDialog(tk.Toplevel):
 
     def _on_ok(self):
         self.result = self.choice_var.get()
-        self.destroy()
-
-
-class TextInputDialog(tk.Toplevel):
-    """Generic single-field text prompt, used for adding a group member by
-    username (no password - that's AddUserDialog's job when creating a new
-    Samba user; this is for assigning an already-existing user)."""
-    def __init__(self, parent, title, prompt):
-        super().__init__(parent)
-        self.title(title)
-        self.resizable(False, False)
-        self.transient(parent)
-        self.result = None
-
-        ttk.Label(self, text=prompt).grid(row=0, column=0, columnspan=2, padx=8, pady=6)
-        self.entry = ttk.Entry(self)
-        self.entry.grid(row=1, column=0, columnspan=2, padx=8, pady=6)
-
-        btn_frame = ttk.Frame(self)
-        btn_frame.grid(row=2, column=0, columnspan=2, pady=10)
-        ttk.Button(btn_frame, text="OK", command=self._on_ok).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=4)
-
-        self.entry.focus_set()
-        self.grab_set()
-        self.wait_window(self)
-
-    def _on_ok(self):
-        value = self.entry.get().strip()
-        if not value:
-            messagebox.showerror("Invalid input", "This field cannot be empty.", parent=self)
-            return
-        self.result = value
         self.destroy()
 
 
@@ -234,9 +207,10 @@ class GUIWizard:
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True, padx=8, pady=8)
 
-        self.shares_list = ttk.Treeview(tree_frame, columns=("name", "path"), show="headings")
+        self.shares_list = ttk.Treeview(tree_frame, columns=("name", "path", "users"), show="headings")
         self.shares_list.heading("name", text="Share Name")
         self.shares_list.heading("path", text="Path")
+        self.shares_list.heading("users", text="Users")
         self.shares_list.pack(side="left", fill="both", expand=True)
 
         shares_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.shares_list.yview)
@@ -358,7 +332,8 @@ class GUIWizard:
         self._last_suggested_path = suggested
 
     def _add_user(self):
-        dialog = AddUserDialog(self.root)
+        existing = [u["username"] for u in self.wizard.list_users()]
+        dialog = AddUserDialog(self.root, existing_usernames=existing)
         if dialog.result:
             self.pending_users.append(dialog.result)
             self.users_list.insert("", tk.END, values=(dialog.result["username"],))
@@ -374,7 +349,10 @@ class GUIWizard:
         for item in self.shares_list.get_children():
             self.shares_list.delete(item)
         for share in self.wizard.list_shares():
-            self.shares_list.insert("", tk.END, values=(share.get("name", "?"), share.get("path", "Unknown")))
+            users = ", ".join(u["username"] for u in share.get("users", [])) or "(none)"
+            self.shares_list.insert(
+                "", tk.END, values=(share.get("name", "?"), share.get("path", "Unknown"), users)
+            )
 
     def _add_user_to_selected_share(self):
         selection = self.shares_list.selection()
@@ -382,7 +360,8 @@ class GUIWizard:
             messagebox.showinfo("Add user", "Select a share first.")
             return
         share_name = self.shares_list.item(selection[0], "values")[0]
-        dialog = AddUserDialog(self.root)
+        existing = [u["username"] for u in self.wizard.list_users()]
+        dialog = AddUserDialog(self.root, existing_usernames=existing)
         if not dialog.result:
             return
         username = dialog.result["username"]
@@ -472,7 +451,17 @@ class GUIWizard:
         if not group_name:
             messagebox.showinfo("Add member", "Select a group first.")
             return
-        dialog = TextInputDialog(self.root, "Add Member", f"Username to add to '{group_name}':")
+        # A dropdown of existing users, not free text: adding a member
+        # requires an already-existing account (unlike "Add User to Share",
+        # which can create one) - _add_user_to_group_linux validates and
+        # refuses otherwise, so free text here could only ever fail.
+        usernames = [u["username"] for u in self.wizard.list_users()]
+        if not usernames:
+            messagebox.showinfo("Add member", "No existing users to add. Create one via 'Add User to Share' first.")
+            return
+        dialog = ChoiceDialog(
+            self.root, "Add Member", f"Add which user to '{group_name}'?", usernames, ok_label="Add"
+        )
         if not dialog.result:
             return
         threading.Thread(
