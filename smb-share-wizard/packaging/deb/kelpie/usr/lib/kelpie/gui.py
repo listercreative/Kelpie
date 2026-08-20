@@ -10,6 +10,16 @@ from tkinter.scrolledtext import ScrolledText
 from core import SMBWizard
 
 
+def _center_over_parent(win, parent):
+    # Tkinter Toplevels default to wherever the window manager feels like
+    # (often the screen's top-left corner), not anywhere near the window
+    # that spawned them - place it over its parent instead.
+    win.update_idletasks()
+    x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_reqwidth()) // 2
+    y = parent.winfo_rooty() + (parent.winfo_height() - win.winfo_reqheight()) // 2
+    win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+
 class AddUserDialog(tk.Toplevel):
     def __init__(self, parent, existing_usernames=()):
         super().__init__(parent)
@@ -42,6 +52,7 @@ class AddUserDialog(tk.Toplevel):
         ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=4)
 
         self.username_entry.focus_set()
+        _center_over_parent(self, parent)
         self.grab_set()
         self.wait_window(self)
 
@@ -84,6 +95,7 @@ class ChoiceDialog(tk.Toplevel):
         ttk.Button(btn_frame, text=ok_label, command=self._on_ok).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=4)
 
+        _center_over_parent(self, parent)
         self.grab_set()
         self.wait_window(self)
 
