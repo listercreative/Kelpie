@@ -15,6 +15,16 @@ except ImportError:
     TKINTER_AVAILABLE = False
 
 
+def _run(args, **kwargs):
+    # A --windowed PyInstaller build has no console of its own, so any
+    # child process without CREATE_NO_WINDOW gets a brand-new one that
+    # flashes open and closes on screen - Windows-only, the flag doesn't
+    # exist on other platforms.
+    if platform.system() == "Windows":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return subprocess.run(args, **kwargs)
+
+
 class SMBWizard:
     """Platform detection, persistence, privilege elevation, and the actual
     per-OS commands that create/apply an SMB share. No UI code lives here —
@@ -258,7 +268,7 @@ class SMBWizard:
             return {p.pw_name for p in pwd.getpwall() if min_uid <= p.pw_uid < 65534}
         elif self.system == "Windows":
             cmd = "Get-LocalUser | Select-Object Name | ConvertTo-Json -Compress"
-            proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+            proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
             if proc.returncode != 0 or not proc.stdout.strip():
                 return set()
             try:
@@ -435,21 +445,21 @@ class SMBWizard:
                     f"-ArgumentList '{arg_str}' "
                     f"-Verb RunAs -Wait"
                 )
-                subprocess.run(["powershell", "-Command", cmd], check=True)
+                _run(["powershell", "-Command", cmd], check=True)
 
             elif self.system == "Darwin":
                 quoted_args = " ".join(f'"{a}"' for a in relaunch_args)
                 apply_cmd = f'{relaunch_target} {quoted_args}'
                 escaped = apply_cmd.replace('\\', '\\\\').replace('"', '\\"')
                 osa_cmd = f'do shell script "{escaped}" with administrator privileges'
-                subprocess.run(["osascript", "-e", osa_cmd], check=True)
+                _run(["osascript", "-e", osa_cmd], check=True)
 
             else:  # Linux
                 if shutil.which("pkexec"):
-                    subprocess.run(["pkexec", relaunch_target, *relaunch_args], check=True)
+                    _run(["pkexec", relaunch_target, *relaunch_args], check=True)
                 else:
                     print("No GUI privilege helper (pkexec) found; falling back to a terminal sudo prompt.")
-                    subprocess.run(["sudo", relaunch_target, *relaunch_args], check=True)
+                    _run(["sudo", relaunch_target, *relaunch_args], check=True)
 
             print("Elevated operation completed.")
             return True
@@ -486,15 +496,15 @@ class SMBWizard:
                     f"-ArgumentList '{arg_str}' "
                     f"-Verb RunAs -Wait"
                 )
-                proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+                proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
             elif self.system == "Darwin":
                 quoted_args = " ".join(f'"{a}"' for a in relaunch_args)
                 apply_cmd = f'{relaunch_target} {quoted_args}'
                 escaped = apply_cmd.replace('\\', '\\\\').replace('"', '\\"')
                 osa_cmd = f'do shell script "{escaped}" with administrator privileges'
-                proc = subprocess.run(["osascript", "-e", osa_cmd], capture_output=True, text=True)
+                proc = _run(["osascript", "-e", osa_cmd], capture_output=True, text=True)
             else:  # Linux - caller guarantees pkexec is available
-                proc = subprocess.run(
+                proc = _run(
                     ["pkexec", relaunch_target, *relaunch_args], capture_output=True, text=True
                 )
             output = (proc.stdout or "") + (proc.stderr or "")
@@ -666,7 +676,7 @@ class SMBWizard:
     def _ensure_windows_group(self, group_name):
         escaped = self._ps_quote(group_name)
         cmd = f"if (-not (Get-LocalGroup -Name '{escaped}' -ErrorAction SilentlyContinue)) {{ New-LocalGroup -Name '{escaped}' }}"
-        subprocess.run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
+        _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
 
     def _configure_windows_user(self, username, password):
         # Password travels via an env var, never interpolated into the
@@ -681,21 +691,21 @@ class SMBWizard:
         )
         env = dict(os.environ)
         env["KELPIE_TEMP_PW"] = password
-        subprocess.run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True, env=env)
+        _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True, env=env)
 
     def _add_windows_user_to_group(self, username, group_name):
         cmd = f"Add-LocalGroupMember -Group '{self._ps_quote(group_name)}' -Member '{self._ps_quote(username)}' -ErrorAction SilentlyContinue"
-        subprocess.run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
+        _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
 
     def _grant_windows_ntfs_permissions(self, share_path, group_name):
         # icacls is invoked directly (no shell), so no PowerShell quoting needed.
-        subprocess.run(["icacls", share_path, "/grant", f"{group_name}:(OI)(CI)M"], check=True, capture_output=True, text=True)
+        _run(["icacls", share_path, "/grant", f"{group_name}:(OI)(CI)M"], check=True, capture_output=True, text=True)
 
     def run_windows(self):
         print(f"[Windows] Executing configuration for '{self.share_name}'...")
         try:
             print(f"  - Ensuring directory exists: {self.share_path}")
-            subprocess.run(["powershell", "-Command", f"New-Item -Path '{self._ps_quote(self.share_path)}' -ItemType Directory -Force"], check=True, capture_output=True, text=True)
+            _run(["powershell", "-Command", f"New-Item -Path '{self._ps_quote(self.share_path)}' -ItemType Directory -Force"], check=True, capture_output=True, text=True)
 
             group_name = self._windows_group_name(self.share_name)
             print(f"  - Ensuring local group '{group_name}'...")
@@ -712,7 +722,7 @@ class SMBWizard:
 
             print(f"  - Creating share '{self.share_name}' with FullAccess for '{group_name}'...")
             cmd = f"New-SmbShare -Name '{self._ps_quote(self.share_name)}' -Path '{self._ps_quote(self.share_path)}' -FullAccess '{self._ps_quote(group_name)}' -ErrorAction SilentlyContinue"
-            subprocess.run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
+            _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
 
             print("[Windows] Success.")
         except subprocess.CalledProcessError as e:
@@ -722,7 +732,7 @@ class SMBWizard:
 
     def _list_shares_windows(self):
         cmd = "Get-SmbShare | Select-Object Name,Path | ConvertTo-Json -Compress"
-        proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+        proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0 or not proc.stdout.strip():
             return []
         try:
@@ -745,7 +755,7 @@ class SMBWizard:
                 f"Get-SmbShareAccess -Name '{self._ps_quote(share['name'])}' "
                 f"| Select-Object AccountName | ConvertTo-Json -Compress"
             )
-            aproc = subprocess.run(["powershell", "-Command", acc_cmd], capture_output=True, text=True)
+            aproc = _run(["powershell", "-Command", acc_cmd], capture_output=True, text=True)
             if aproc.returncode != 0 or not aproc.stdout.strip():
                 continue
             try:
@@ -763,7 +773,7 @@ class SMBWizard:
 
     def _list_groups_windows(self):
         cmd = "Get-LocalGroup | Where-Object { $_.Name -like 'Kelpie_*' } | Select-Object Name | ConvertTo-Json -Compress"
-        proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+        proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0 or not proc.stdout.strip():
             return []
         try:
@@ -789,7 +799,7 @@ class SMBWizard:
                 f"Get-LocalGroupMember -Group '{self._ps_quote(name)}' "
                 f"| Select-Object Name | ConvertTo-Json -Compress"
             )
-            mproc = subprocess.run(["powershell", "-Command", members_cmd], capture_output=True, text=True)
+            mproc = _run(["powershell", "-Command", members_cmd], capture_output=True, text=True)
             members = []
             if mproc.returncode == 0 and mproc.stdout.strip():
                 try:
@@ -808,7 +818,7 @@ class SMBWizard:
 
     def _delete_share_windows(self, name):
         cmd = f"Remove-SmbShare -Name '{self._ps_quote(name)}' -Force -ErrorAction Stop"
-        proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+        proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         return proc.returncode == 0
 
     def _add_user_to_share_windows(self, share_name, username, password):
@@ -839,13 +849,13 @@ class SMBWizard:
                 f"Remove-LocalGroupMember -Group '{self._ps_quote(group_name)}' "
                 f"-Member '{self._ps_quote(username)}' -ErrorAction SilentlyContinue"
             )
-            subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+            _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         print(f"[Windows] Removed '{username}' from share '{share_name}'.")
         return True
 
     def _delete_user_windows(self, username):
         cmd = f"Remove-LocalUser -Name '{self._ps_quote(username)}' -ErrorAction Stop"
-        proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+        proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[Windows] Failed to delete user '{username}': {proc.stderr.strip()}")
             return False
@@ -854,7 +864,7 @@ class SMBWizard:
 
     def _delete_group_windows(self, group_name):
         cmd = f"Remove-LocalGroup -Name '{self._ps_quote(group_name)}' -ErrorAction Stop"
-        proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+        proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[Windows] Failed to delete group '{group_name}': {proc.stderr.strip()}")
             return False
@@ -866,7 +876,7 @@ class SMBWizard:
             f"Add-LocalGroupMember -Group '{self._ps_quote(group_name)}' "
             f"-Member '{self._ps_quote(username)}' -ErrorAction Stop"
         )
-        proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+        proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[Windows] Failed to add '{username}' to group '{group_name}': {proc.stderr.strip()}")
             return False
@@ -878,7 +888,7 @@ class SMBWizard:
             f"Remove-LocalGroupMember -Group '{self._ps_quote(group_name)}' "
             f"-Member '{self._ps_quote(username)}' -ErrorAction Stop"
         )
-        proc = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
+        proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[Windows] Failed to remove '{username}' from group '{group_name}': {proc.stderr.strip()}")
             return False
@@ -892,14 +902,14 @@ class SMBWizard:
         print("[Linux] Samba not found. Attempting installation...")
         try:
             if shutil.which("apt-get"):
-                subprocess.run(["apt-get", "update"], check=True, capture_output=True, text=True)
-                subprocess.run(["apt-get", "install", "-y", "samba"], check=True, capture_output=True, text=True)
+                _run(["apt-get", "update"], check=True, capture_output=True, text=True)
+                _run(["apt-get", "install", "-y", "samba"], check=True, capture_output=True, text=True)
             elif shutil.which("dnf"):
-                subprocess.run(["dnf", "install", "-y", "samba"], check=True, capture_output=True, text=True)
+                _run(["dnf", "install", "-y", "samba"], check=True, capture_output=True, text=True)
             elif shutil.which("yum"):
-                subprocess.run(["yum", "install", "-y", "samba"], check=True, capture_output=True, text=True)
+                _run(["yum", "install", "-y", "samba"], check=True, capture_output=True, text=True)
             elif shutil.which("pacman"):
-                subprocess.run(["pacman", "-S", "--noconfirm", "samba"], check=True, capture_output=True, text=True)
+                _run(["pacman", "-S", "--noconfirm", "samba"], check=True, capture_output=True, text=True)
             else:
                 print("[Linux] No supported package manager found (tried apt-get/dnf/yum/pacman). Please install Samba manually.")
                 return False
@@ -920,7 +930,7 @@ class SMBWizard:
         # discovers servers via NetBIOS/workgroup browsing (as opposed to a
         # direct \\host\share path), even though the share itself works
         # fine. Fix it once, system-wide, rather than per-share.
-        proc = subprocess.run(
+        proc = _run(
             ["testparm", "-s", "--parameter-name=disable netbios"],
             capture_output=True, text=True
         )
@@ -947,10 +957,10 @@ class SMBWizard:
         print("[Linux] NetBIOS was disabled in smb.conf (Ubuntu's default) - enabled it so this "
               "server's name/workgroup is visible to browsing clients.")
         try:
-            subprocess.run(["systemctl", "restart", "nmbd"], check=True, capture_output=True, text=True)
+            _run(["systemctl", "restart", "nmbd"], check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError:
             try:
-                subprocess.run(["systemctl", "restart", "nmb"], check=True, capture_output=True, text=True)
+                _run(["systemctl", "restart", "nmb"], check=True, capture_output=True, text=True)
             except subprocess.CalledProcessError as e:
                 print(f"[Linux] Enabled NetBIOS but failed to start the name-service daemon: {e.stderr if e.stderr else e}")
 
@@ -976,32 +986,32 @@ class SMBWizard:
         print(f"[Linux] Appended share definition to {smb_conf}")
 
     def _configure_linux_user(self, username, password):
-        exists = subprocess.run(["id", username], capture_output=True, text=True).returncode == 0
+        exists = _run(["id", username], capture_output=True, text=True).returncode == 0
         if not exists:
             print(f"[Linux] Creating system user '{username}'...")
-            subprocess.run(["useradd", "-M", "-s", "/usr/sbin/nologin", username], check=True, capture_output=True, text=True)
+            _run(["useradd", "-M", "-s", "/usr/sbin/nologin", username], check=True, capture_output=True, text=True)
 
         print(f"[Linux] Setting Samba password for '{username}'...")
-        proc = subprocess.run(
+        proc = _run(
             ["smbpasswd", "-a", "-s", username],
             input=f"{password}\n{password}\n", capture_output=True, text=True
         )
         if proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, "smbpasswd", output=proc.stdout, stderr=proc.stderr)
-        subprocess.run(["smbpasswd", "-e", username], check=True, capture_output=True, text=True)
+        _run(["smbpasswd", "-e", username], check=True, capture_output=True, text=True)
 
     def _share_group_name(self, share_name):
         slug = re.sub(r'[^a-z0-9_-]', '_', share_name.lower()).strip('_-') or "share"
         return f"smbshare_{slug}"[:32]
 
     def _ensure_group(self, group_name):
-        exists = subprocess.run(["getent", "group", group_name], capture_output=True, text=True).returncode == 0
+        exists = _run(["getent", "group", group_name], capture_output=True, text=True).returncode == 0
         if not exists:
             print(f"[Linux] Creating group '{group_name}'...")
-            subprocess.run(["groupadd", group_name], check=True, capture_output=True, text=True)
+            _run(["groupadd", group_name], check=True, capture_output=True, text=True)
 
     def _add_user_to_group(self, username, group_name):
-        subprocess.run(["usermod", "-aG", group_name, username], check=True, capture_output=True, text=True)
+        _run(["usermod", "-aG", group_name, username], check=True, capture_output=True, text=True)
 
     def _repair_group_if_orphaned(self, path, group_name):
         # If path's current group doesn't correspond to any real group
@@ -1024,7 +1034,7 @@ class SMBWizard:
             pass
         print(f"'{path}''s group (gid {current_gid}) no longer exists - refreshing it to '{group_name}'...")
         if self.system == "Darwin":
-            subprocess.run(["chgrp", group_name, path], check=True, capture_output=True, text=True)
+            _run(["chgrp", group_name, path], check=True, capture_output=True, text=True)
         else:
             shutil.chown(path, group=group_name)
         os.chmod(path, 0o2770)
@@ -1057,7 +1067,7 @@ class SMBWizard:
                 break
             if not (st.st_mode & 0o001):  # "other" execute/traversal bit not already set
                 print(f"[Linux] Granting group '{group_name}' traversal-only access through '{current}'...")
-                subprocess.run(
+                _run(
                     ["setfacl", "-m", f"g:{group_name}:--x", current], capture_output=True, text=True
                 )
             parent = os.path.dirname(current)
@@ -1105,7 +1115,7 @@ class SMBWizard:
         for services in (["smbd", "nmbd"], ["smb", "nmb"]):
             try:
                 for svc in services:
-                    subprocess.run(["systemctl", "restart", svc], check=True, capture_output=True, text=True)
+                    _run(["systemctl", "restart", svc], check=True, capture_output=True, text=True)
                 return
             except subprocess.CalledProcessError:
                 continue
@@ -1314,7 +1324,7 @@ class SMBWizard:
             # Not an error if they weren't a member (e.g. added to the
             # share's valid-users line by hand, never actually in the
             # group) - just make sure they aren't now.
-            subprocess.run(["gpasswd", "-d", username, group_name], capture_output=True, text=True)
+            _run(["gpasswd", "-d", username, group_name], capture_output=True, text=True)
 
         try:
             self._restart_samba_service()
@@ -1334,8 +1344,8 @@ class SMBWizard:
             if any(u["username"] == username for u in share.get("users", [])):
                 self._remove_valid_user_from_smb_conf(share["name"], username)
 
-        subprocess.run(["smbpasswd", "-x", username], capture_output=True, text=True)
-        proc = subprocess.run(["userdel", username], capture_output=True, text=True)
+        _run(["smbpasswd", "-x", username], capture_output=True, text=True)
+        proc = _run(["userdel", username], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[Linux] Failed to delete user '{username}': {proc.stderr.strip()}")
             return False
@@ -1349,7 +1359,7 @@ class SMBWizard:
         return True
 
     def _delete_group_linux(self, group_name):
-        proc = subprocess.run(["groupdel", group_name], capture_output=True, text=True)
+        proc = _run(["groupdel", group_name], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[Linux] Failed to delete group '{group_name}': {proc.stderr.strip()}")
             return False
@@ -1357,10 +1367,10 @@ class SMBWizard:
         return True
 
     def _add_user_to_group_linux(self, username, group_name):
-        if subprocess.run(["id", username], capture_output=True, text=True).returncode != 0:
+        if _run(["id", username], capture_output=True, text=True).returncode != 0:
             print(f"[Linux] No such user: '{username}'")
             return False
-        if subprocess.run(["getent", "group", group_name], capture_output=True, text=True).returncode != 0:
+        if _run(["getent", "group", group_name], capture_output=True, text=True).returncode != 0:
             print(f"[Linux] No such group: '{group_name}'")
             return False
         self._add_user_to_group(username, group_name)
@@ -1368,7 +1378,7 @@ class SMBWizard:
         return True
 
     def _remove_user_from_group_linux(self, username, group_name):
-        proc = subprocess.run(["gpasswd", "-d", username, group_name], capture_output=True, text=True)
+        proc = _run(["gpasswd", "-d", username, group_name], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[Linux] Failed to remove '{username}' from group '{group_name}': {proc.stderr.strip()}")
             return False
@@ -1376,27 +1386,27 @@ class SMBWizard:
         return True
 
     def _configure_macos_user(self, username, password):
-        exists = subprocess.run(["dscl", ".", "-read", f"/Users/{username}"], capture_output=True, text=True).returncode == 0
+        exists = _run(["dscl", ".", "-read", f"/Users/{username}"], capture_output=True, text=True).returncode == 0
         if not exists:
             print(f"[macOS] Creating user '{username}'...")
-            subprocess.run(["sysadminctl", "-addUser", username, "-password", password], check=True, capture_output=True, text=True)
+            _run(["sysadminctl", "-addUser", username, "-password", password], check=True, capture_output=True, text=True)
         else:
             print(f"[macOS] Setting password for existing user '{username}'...")
-            subprocess.run(["dscl", ".", "-passwd", f"/Users/{username}", password], check=True, capture_output=True, text=True)
-        subprocess.run(["dseditgroup", "-o", "edit", "-a", username, "-t", "user", "com.apple.access_smb"], check=True, capture_output=True, text=True)
+            _run(["dscl", ".", "-passwd", f"/Users/{username}", password], check=True, capture_output=True, text=True)
+        _run(["dseditgroup", "-o", "edit", "-a", username, "-t", "user", "com.apple.access_smb"], check=True, capture_output=True, text=True)
 
     def _macos_group_name(self, share_name):
         slug = re.sub(r'[^a-zA-Z0-9_-]', '_', share_name).strip('_-') or 'share'
         return f"kelpie_{slug}"
 
     def _ensure_macos_group(self, group_name):
-        exists = subprocess.run(["dscl", ".", "-read", f"/Groups/{group_name}"], capture_output=True, text=True).returncode == 0
+        exists = _run(["dscl", ".", "-read", f"/Groups/{group_name}"], capture_output=True, text=True).returncode == 0
         if not exists:
             print(f"[macOS] Creating group '{group_name}'...")
-            subprocess.run(["dseditgroup", "-o", "create", group_name], check=True, capture_output=True, text=True)
+            _run(["dseditgroup", "-o", "create", group_name], check=True, capture_output=True, text=True)
 
     def _add_macos_user_to_group(self, username, group_name):
-        subprocess.run(["dseditgroup", "-o", "edit", "-a", username, "-t", "user", group_name], check=True, capture_output=True, text=True)
+        _run(["dseditgroup", "-o", "edit", "-a", username, "-t", "user", group_name], check=True, capture_output=True, text=True)
 
     def _expose_macos_share_directory(self, share_path, group_name, path_existed_before):
         # Same underlying issue as Linux: macOS filesystem permissions are
@@ -1419,18 +1429,18 @@ class SMBWizard:
         # whichever privileged context created it.
         owner = self._real_username()
         if owner:
-            subprocess.run(["chown", owner, share_path], check=True, capture_output=True, text=True)
-        subprocess.run(["chgrp", group_name, share_path], check=True, capture_output=True, text=True)
+            _run(["chown", owner, share_path], check=True, capture_output=True, text=True)
+        _run(["chgrp", group_name, share_path], check=True, capture_output=True, text=True)
         os.chmod(share_path, 0o2770)
 
     def _create_macos_share(self, share_name, share_path):
         print(f"[macOS] Creating share '{share_name}' at '{share_path}'...")
-        subprocess.run(["sharing", "-a", share_path, "-S", share_name, "-s", "001"], check=True, capture_output=True, text=True)
+        _run(["sharing", "-a", share_path, "-S", share_name, "-s", "001"], check=True, capture_output=True, text=True)
 
     def _enable_macos_smb_sharing(self):
         print("[macOS] Enabling SMB file sharing service...")
-        subprocess.run(["launchctl", "enable", "system/com.apple.smbd"], check=True, capture_output=True, text=True)
-        subprocess.run(["launchctl", "kickstart", "-k", "system/com.apple.smbd"], check=True, capture_output=True, text=True)
+        _run(["launchctl", "enable", "system/com.apple.smbd"], check=True, capture_output=True, text=True)
+        _run(["launchctl", "kickstart", "-k", "system/com.apple.smbd"], check=True, capture_output=True, text=True)
 
     def run_macos(self):
         print(f"[macOS] Executing configuration for '{self.share_name}'...")
@@ -1458,7 +1468,7 @@ class SMBWizard:
             print(f"[macOS] An unexpected error occurred: {e}")
 
     def _list_shares_macos(self):
-        proc = subprocess.run(["sharing", "-l"], capture_output=True, text=True)
+        proc = _run(["sharing", "-l"], capture_output=True, text=True)
         if proc.returncode != 0:
             return []
         shares = []
@@ -1480,7 +1490,7 @@ class SMBWizard:
         return shares
 
     def _delete_share_macos(self, name):
-        proc = subprocess.run(["sharing", "-r", name], capture_output=True, text=True)
+        proc = _run(["sharing", "-r", name], capture_output=True, text=True)
         return proc.returncode == 0
 
     def _add_user_to_share_macos(self, share_name, username, password):
@@ -1507,7 +1517,7 @@ class SMBWizard:
             return False
         group_name = share.get("group")
         if group_name:
-            subprocess.run(
+            _run(
                 ["dseditgroup", "-o", "edit", "-d", username, "-t", "user", group_name],
                 capture_output=True, text=True
             )
@@ -1515,11 +1525,11 @@ class SMBWizard:
         return True
 
     def _delete_user_macos(self, username):
-        subprocess.run(
+        _run(
             ["dseditgroup", "-o", "edit", "-d", username, "-t", "user", "com.apple.access_smb"],
             capture_output=True, text=True
         )
-        proc = subprocess.run(["sysadminctl", "-deleteUser", username], capture_output=True, text=True)
+        proc = _run(["sysadminctl", "-deleteUser", username], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[macOS] Failed to delete user '{username}': {proc.stderr.strip()}")
             return False
@@ -1527,7 +1537,7 @@ class SMBWizard:
         return True
 
     def _delete_group_macos(self, group_name):
-        proc = subprocess.run(["dseditgroup", "-o", "delete", group_name], capture_output=True, text=True)
+        proc = _run(["dseditgroup", "-o", "delete", group_name], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"[macOS] Failed to delete group '{group_name}': {proc.stderr.strip()}")
             return False
@@ -1535,13 +1545,13 @@ class SMBWizard:
         return True
 
     def _add_user_to_group_macos(self, username, group_name):
-        if subprocess.run(["dscl", ".", "-read", f"/Users/{username}"], capture_output=True, text=True).returncode != 0:
+        if _run(["dscl", ".", "-read", f"/Users/{username}"], capture_output=True, text=True).returncode != 0:
             print(f"[macOS] No such user: '{username}'")
             return False
-        if subprocess.run(["dscl", ".", "-read", f"/Groups/{group_name}"], capture_output=True, text=True).returncode != 0:
+        if _run(["dscl", ".", "-read", f"/Groups/{group_name}"], capture_output=True, text=True).returncode != 0:
             print(f"[macOS] No such group: '{group_name}'")
             return False
-        subprocess.run(
+        _run(
             ["dseditgroup", "-o", "edit", "-a", username, "-t", "user", group_name],
             check=True, capture_output=True, text=True
         )
@@ -1549,7 +1559,7 @@ class SMBWizard:
         return True
 
     def _remove_user_from_group_macos(self, username, group_name):
-        proc = subprocess.run(
+        proc = _run(
             ["dseditgroup", "-o", "edit", "-d", username, "-t", "user", group_name],
             capture_output=True, text=True
         )
