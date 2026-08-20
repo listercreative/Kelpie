@@ -867,6 +867,9 @@ Remove-Item $cfgPath,$dbPath -ErrorAction SilentlyContinue
             print(f"  - Granting NTFS permissions to '{group_name}' on '{self.share_path}'...")
             self._grant_windows_ntfs_permissions(self.share_path, group_name)
 
+            print("  - Ensuring Windows Firewall allows SMB access...")
+            self._ensure_windows_firewall_and_network()
+
             print(f"  - Creating share '{self.share_name}' with FullAccess for '{group_name}'...")
             cmd = f"New-SmbShare -Name '{self._ps_quote(self.share_name)}' -Path '{self._ps_quote(self.share_path)}' -FullAccess '{self._ps_quote(group_name)}' -ErrorAction SilentlyContinue"
             _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
@@ -876,6 +879,32 @@ Remove-Item $cfgPath,$dbPath -ErrorAction SilentlyContinue
             print(f"[Windows] Error during execution: {e.stderr if e.stderr else e}")
         except Exception as e:
             print(f"[Windows] An unexpected error occurred: {e}")
+
+    def _ensure_windows_firewall_and_network(self):
+        # Windows-equivalent of _ensure_netbios_enabled_linux(): an
+        # otherwise correctly configured share can be silently unreachable
+        # (connection just hangs - Windows Firewall drops rather than
+        # refuses) if either of these isn't already set up, which is easy
+        # to hit on a fresh machine or over an overlay network like
+        # Tailscale that Windows doesn't already trust.
+        script = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+# Same effect as ticking "File and Printer Sharing" in Windows' own
+# network-sharing settings - without this, SMB can be reachable on one
+# network profile and silently dropped on another even with a valid
+# share and firewall-unaware account setup.
+Set-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Enabled True
+
+# A Tailscale adapter is a private, authenticated mesh network by
+# definition - if Windows categorized it as Public (the common cause of
+# "share works on the LAN but hangs over Tailscale"), the Private-scoped
+# sharing rule above won't apply to traffic arriving on it. Only ever
+# touches the Tailscale interface specifically, never any other adapter.
+Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' -and $_.NetworkCategory -eq 'Public' } | ForEach-Object {
+    Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private
+}
+"""
+        self._run_ps_script(script, capture_output=True, text=True)
 
     @staticmethod
     def _as_list(value):
