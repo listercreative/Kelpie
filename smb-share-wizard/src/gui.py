@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -129,8 +130,15 @@ class GUIWizard:
 
     def _load_icon_image(self):
         # Ships right next to this file both in the source tree and in the
-        # installed package (see build.sh), so this resolves either way.
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kelpie_icon.png")
+        # installed package (see build.sh). A frozen PyInstaller --onefile
+        # build extracts its data files (see build.ps1's --add-data) into a
+        # temp dir at sys._MEIPASS instead - __file__ isn't a real path
+        # there, so that has to be checked first.
+        if getattr(sys, 'frozen', False):
+            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base_dir, "kelpie_icon.png")
         try:
             self._icon_image = tk.PhotoImage(file=icon_path)
         except tk.TclError:

@@ -19,6 +19,7 @@ pyinstaller `
   --windowed `
   --name Kelpie `
   --icon kelpie_icon.ico `
+  --add-data "..\..\src\kelpie_icon.png;." `
   --hidden-import=core --hidden-import=cli --hidden-import=gui --hidden-import=tui `
   --collect-all=rich `
   --distpath . `
