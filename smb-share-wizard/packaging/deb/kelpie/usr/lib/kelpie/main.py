@@ -52,7 +52,13 @@ Usage:
     }
 
     try:
-        if len(sys.argv) >= 3 and sys.argv[1] in RELAUNCH_HANDLERS:
+        if len(sys.argv) >= 2 and sys.argv[1] == "--uninstall-cleanup":
+            # Internal only - invoked by the MSI's uninstall custom action
+            # (see kelpie.wxs), not user-facing. Takes no payload file,
+            # unlike the elevation relaunch handlers below.
+            from core import SMBWizard
+            SMBWizard.uninstall_cleanup_windows()
+        elif len(sys.argv) >= 3 and sys.argv[1] in RELAUNCH_HANDLERS:
             from core import SMBWizard
             getattr(SMBWizard, RELAUNCH_HANDLERS[sys.argv[1]])(sys.argv[2])
         else:

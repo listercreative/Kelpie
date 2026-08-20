@@ -47,6 +47,25 @@
       <ComponentRef Id="ApplicationShortcut" />
     </Feature>
 
+    <!-- Kelpie-created local users/groups live outside the app entirely -
+         nothing else would ever clean them up. Runs before files are
+         removed, only on a genuine uninstall (never as part of an
+         upgrade's remove-old-version step, which would otherwise wipe out
+         every share's accounts on every update). Impersonate="no" and
+         deferred execution run this with the same admin rights the MSI
+         itself already has; Return="ignore" means a cleanup failure can
+         never block the uninstall from completing. -->
+    <CustomAction Id="KelpieUninstallCleanup"
+                  FileRef="KelpieExe"
+                  ExeCommand="--uninstall-cleanup"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="KelpieUninstallCleanup" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <ui:WixUI Id="WixUI_InstallDir" />

@@ -671,6 +671,50 @@ class SMBWizard:
         wizard._invoking_user_override = data.get('_invoking_user')
         wizard.remove_user_from_group(data['username'], data['group'])
 
+    @staticmethod
+    def uninstall_cleanup_windows():
+        # Run by the MSI's uninstall custom action (see kelpie.wxs), before
+        # Kelpie's own files are removed - nothing else would ever clean
+        # these up otherwise, since they're real local Windows accounts and
+        # groups living outside the app entirely. Deletes every Kelpie_*
+        # group, then any user left with no other group membership beyond
+        # Windows' own default ('Users'/'None') - i.e. an account that only
+        # ever existed for Kelpie shares. A user who's also in some other,
+        # real group is left alone even if they lose Kelpie access here.
+        print("[Windows] Removing Kelpie-managed local accounts and groups...")
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$kelpieGroups = Get-LocalGroup | Where-Object { $_.Name -like 'Kelpie_*' }
+$affectedUsers = @{}
+foreach ($g in $kelpieGroups) {
+    Get-LocalGroupMember -Group $g.Name -ErrorAction SilentlyContinue | ForEach-Object {
+        $name = $_.Name.Split('\')[-1]
+        $affectedUsers[$name] = $true
+    }
+    Remove-LocalGroup -Name $g.Name -ErrorAction SilentlyContinue
+}
+$defaultGroups = @('Users', 'None')
+foreach ($username in $affectedUsers.Keys) {
+    try {
+        $user = [ADSI]"WinNT://./$username,user"
+        $stillInOtherGroup = $false
+        foreach ($grp in $user.Groups()) {
+            $gname = $grp.GetType().InvokeMember('Name', 'GetProperty', $null, $grp, $null)
+            if ($defaultGroups -notcontains $gname) { $stillInOtherGroup = $true }
+        }
+        if (-not $stillInOtherGroup) {
+            Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
+            $regPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
+            Remove-ItemProperty -Path $regPath -Name $username -ErrorAction SilentlyContinue
+        }
+    } catch { continue }
+}
+"""
+        wizard = SMBWizard()
+        proc = wizard._run_ps_script(script, capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"[Windows] Cleanup warning: {proc.stderr}")
+
     def _ps_quote(self, s):
         # Escape for embedding inside a PowerShell single-quoted string.
         return s.replace("'", "''")
@@ -679,9 +723,78 @@ class SMBWizard:
         cleaned = re.sub(r'[\"/\\\[\]:;|=,+*?<>@\x00-\x1f]', '_', share_name).strip()
         return f"Kelpie_{cleaned or 'Share'}"[:64]
 
+    def _run_ps_script(self, script, **kwargs):
+        # For scripts too long/braces-heavy to safely embed as a single
+        # -Command string (quoting them correctly gets very error-prone) -
+        # write to a temp .ps1 and run that instead.
+        fd, path = tempfile.mkstemp(suffix=".ps1")
+        os.close(fd)
+        try:
+            with open(path, "w") as f:
+                f.write(script)
+            return _run(["powershell", "-ExecutionPolicy", "Bypass", "-File", path], **kwargs)
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
     def _ensure_windows_group(self, group_name):
         escaped = self._ps_quote(group_name)
         cmd = f"if (-not (Get-LocalGroup -Name '{escaped}' -ErrorAction SilentlyContinue)) {{ New-LocalGroup -Name '{escaped}' }}"
+        _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
+        self._deny_interactive_logon_windows(group_name)
+
+    def _deny_interactive_logon_windows(self, group_name):
+        # Windows SMB has no separate credential store the way Samba does
+        # (no equivalent of useradd -s /usr/sbin/nologin) - a share "user"
+        # here is a real local Windows account. Deny it local console and
+        # Remote Desktop logon rights at the group level so it's
+        # functionally SMB-only, the closest achievable equivalent. Scoped
+        # to /areas USER_RIGHTS only, so this can never touch any other
+        # part of local security policy (password/audit policy etc).
+        # Idempotent - safe to call every time a share's group is ensured.
+        escaped = self._ps_quote(group_name)
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$group = Get-LocalGroup -Name '{escaped}'
+$sid = $group.SID.Value
+$cfgPath = Join-Path $env:TEMP 'kelpie_secpol.cfg'
+$dbPath = Join-Path $env:TEMP 'kelpie_secedit.sdb'
+secedit /export /cfg $cfgPath /quiet | Out-Null
+$lines = Get-Content $cfgPath
+function Add-Right($lines, $key, $sid) {{
+    $found = $false
+    $out = foreach ($line in $lines) {{
+        if ($line -match "^$key\\s*=") {{
+            $found = $true
+            if ($line -notmatch [regex]::Escape($sid)) {{ "$line,*$sid" }} else {{ $line }}
+        }} else {{ $line }}
+    }}
+    if (-not $found) {{ $out += "$key = *$sid" }}
+    return $out
+}}
+$lines = Add-Right $lines 'SeDenyInteractiveLogonRight' $sid
+$lines = Add-Right $lines 'SeDenyRemoteInteractiveLogonRight' $sid
+Set-Content -Path $cfgPath -Value $lines
+secedit /configure /db $dbPath /cfg $cfgPath /areas USER_RIGHTS /quiet | Out-Null
+Remove-Item $cfgPath,$dbPath -ErrorAction SilentlyContinue
+"""
+        self._run_ps_script(script, check=True, capture_output=True, text=True)
+
+    def _hide_windows_account_from_logon(self, username):
+        # Kelpie-created accounts shouldn't appear as sign-in tiles on the
+        # Windows Welcome/lock screen - they're SMB-only, not meant to be
+        # logged into. This is the standard Windows mechanism for hiding a
+        # specific local account from that list without affecting its
+        # actual (denied, see _deny_interactive_logon_windows) ability to
+        # log in.
+        escaped = self._ps_quote(username)
+        cmd = (
+            "$path = 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\SpecialAccounts\\UserList'; "
+            "New-Item -Path $path -Force | Out-Null; "
+            f"New-ItemProperty -Path $path -Name '{escaped}' -PropertyType DWord -Value 0 -Force | Out-Null"
+        )
         _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
 
     def _configure_windows_user(self, username, password):
@@ -698,6 +811,7 @@ class SMBWizard:
         env = dict(os.environ)
         env["KELPIE_TEMP_PW"] = password
         _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True, env=env)
+        self._hide_windows_account_from_logon(username)
 
     def _add_windows_user_to_group(self, username, group_name):
         cmd = f"Add-LocalGroupMember -Group '{self._ps_quote(group_name)}' -Member '{self._ps_quote(username)}' -ErrorAction SilentlyContinue"
