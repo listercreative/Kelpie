@@ -182,7 +182,13 @@ class CLIWizard(SMBWizard):
 
             kind, rest = choice[0], choice[1:]
             if kind not in ('a', 'g', 'r', 'q', 'd') or not rest.isdigit() or not (0 <= int(rest) < len(users)):
-                print("Invalid option.")
+                # "<n>" in the menu above is a placeholder to replace with
+                # an actual number, not literal text - spell out a concrete
+                # example, since typing it verbatim is an easy first mistake.
+                if users:
+                    print(f"Invalid option. '<n>' means the user's number - e.g. 'q0' for U0 ({users[0]['username']}).")
+                else:
+                    print("Invalid option.")
                 continue
             user = users[int(rest)]
 

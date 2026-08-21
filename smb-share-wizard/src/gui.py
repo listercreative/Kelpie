@@ -337,22 +337,30 @@ class GUIWizard:
         self.system_users_list.configure(yscrollcommand=system_users_scroll.set)
         system_users_scroll.pack(side="right", fill="y", pady=4)
 
-        users_btn_frame = ttk.Frame(frame)
-        users_btn_frame.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Button(users_btn_frame, text="New User...", command=self._create_new_user).pack(side="left", padx=4)
-        ttk.Button(users_btn_frame, text="Assign to Group...", command=self._assign_selected_user_to_group).pack(
+        # Two rows, not one - six buttons packed side="left" don't fit the
+        # default 560px window width, and pack() doesn't wrap on its own;
+        # the overflow buttons (this bit everyone with "Reset Password &
+        # Show QR...") just get pushed off the visible edge instead of onto
+        # a new row.
+        users_btn_row1 = ttk.Frame(frame)
+        users_btn_row1.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Button(users_btn_row1, text="New User...", command=self._create_new_user).pack(side="left", padx=4)
+        ttk.Button(users_btn_row1, text="Assign to Group...", command=self._assign_selected_user_to_group).pack(
             side="left", padx=4
         )
         ttk.Button(
-            users_btn_frame, text="Remove from Group...", command=self._remove_selected_user_from_group
+            users_btn_row1, text="Remove from Group...", command=self._remove_selected_user_from_group
         ).pack(side="left", padx=4)
-        ttk.Button(users_btn_frame, text="Revoke Access...", command=self._revoke_selected_user_access).pack(
+
+        users_btn_row2 = ttk.Frame(frame)
+        users_btn_row2.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(users_btn_row2, text="Revoke Access...", command=self._revoke_selected_user_access).pack(
             side="left", padx=4
         )
         ttk.Button(
-            users_btn_frame, text="Reset Password & Show QR...", command=self._reset_password_for_selected_user
+            users_btn_row2, text="Reset Password & Show QR...", command=self._reset_password_for_selected_user
         ).pack(side="left", padx=4)
-        ttk.Button(users_btn_frame, text="Delete User", command=self._delete_selected_user).pack(
+        ttk.Button(users_btn_row2, text="Delete User", command=self._delete_selected_user).pack(
             side="left", padx=4
         )
 
