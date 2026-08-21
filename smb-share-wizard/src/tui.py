@@ -2,6 +2,7 @@ import contextlib
 import curses
 import io
 import os
+import textwrap
 import threading
 
 from core import SMBWizard, QR_PASSWORD_RESET_NOTE
@@ -736,14 +737,29 @@ class TUIWizard:
     def _message(self, stdscr, text):
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        for i, line in enumerate(text.split("\n")):
-            if i + 1 < h:
-                try:
-                    stdscr.addstr(i + 1, 2, line[:w - 4])
-                except curses.error:
-                    pass
+        wrap_width = max(20, min(70, w - 4))
+        # Wrap each paragraph (split on \n for intentional line breaks)
+        # to a readable column width, then block-center the result -
+        # a single long unwrapped paragraph previously ran straight off
+        # the right edge of the screen instead of reading as text.
+        lines = []
+        for paragraph in text.split("\n"):
+            lines.extend(textwrap.wrap(paragraph, wrap_width) or [""])
+
+        content_width = min(max((len(l) for l in lines), default=0), w - 4)
+        col = max(2, (w - content_width) // 2)
+        row = max(1, (h - len(lines) - 2) // 2)
+
+        for i, line in enumerate(lines):
+            if row + i >= h - 1:
+                break
+            try:
+                stdscr.addstr(row + i, col, line[:w - 4])
+            except curses.error:
+                pass
+        footer = "Press any key to continue..."
         try:
-            stdscr.addstr(h - 1, 2, "Press any key to continue..."[:w - 4], curses.A_DIM)
+            stdscr.addstr(h - 1, max(2, (w - len(footer)) // 2), footer[:w - 4], curses.A_DIM)
         except curses.error:
             pass
         stdscr.refresh()
