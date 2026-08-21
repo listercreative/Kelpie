@@ -937,9 +937,13 @@ foreach ($username in $affectedUsers.Keys) {{
         # right when a password is set (share creation / add user) - Kelpie
         # doesn't persist plaintext passwords anywhere, so there's no way to
         # generate this later for an existing user.
+        # "name" is the bridge's own display name (the computer/NAS being
+        # connected to) - "sharePath" is the specific share on it. Using
+        # share_name for both meant the "Bridge Name" field in LockNAS
+        # showed the share, not the machine.
         return json.dumps({
             "type": "locknas_bridge",
-            "name": share_name,
+            "name": socket.gethostname(),
             "ipOrHost": self._detect_lan_ip(),
             "port": 445,
             "sharePath": share_name,
