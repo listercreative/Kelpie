@@ -1336,6 +1336,20 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
         return True
 
     def _delete_user_windows(self, username):
+        # Revoke SMB share-level access first - Remove-LocalUser only
+        # deletes the account itself, and doesn't touch any
+        # Grant-SmbShareAccess entries that reference it. Left alone, those
+        # become orphaned ACEs Windows can no longer resolve back to a
+        # name, showing up as a raw SID (e.g. "*S-1-5-21-...") in a share's
+        # user list forever.
+        for share in self.list_shares():
+            if any(u["username"] == username for u in share.get("users", [])):
+                revoke_cmd = (
+                    f"Revoke-SmbShareAccess -Name '{self._ps_quote(share['name'])}' "
+                    f"-AccountName '{self._ps_quote(username)}' -Force -ErrorAction SilentlyContinue"
+                )
+                _run(["powershell", "-Command", revoke_cmd], capture_output=True, text=True)
+
         cmd = f"Remove-LocalUser -Name '{self._ps_quote(username)}' -ErrorAction Stop"
         proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if proc.returncode != 0:
