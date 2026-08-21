@@ -8,6 +8,7 @@
 # One-time tool setup:
 #   dotnet tool install --global wix --version 5.0.2
 #   wix extension add --global WixToolset.UI.wixext/5.0.2
+#   wix extension add --global WixToolset.Util.wixext/5.0.2
 
 $ErrorActionPreference = "Stop"
 
@@ -73,7 +74,7 @@ python -m PyInstaller `
 Assert-LastExitCode "pyinstaller"
 
 Set-Location $PSScriptRoot
-wix build (Join-Path $PSScriptRoot "kelpie.wxs") -ext WixToolset.UI.wixext -out (Join-Path $PSScriptRoot "Kelpie.msi")
+wix build (Join-Path $PSScriptRoot "kelpie.wxs") -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -out (Join-Path $PSScriptRoot "Kelpie.msi")
 Assert-LastExitCode "wix build"
 
 Write-Host "Built Kelpie.msi"
