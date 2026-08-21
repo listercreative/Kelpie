@@ -292,6 +292,13 @@ class TUIWizard:
                 print(f"'{action['username']}' is now {level} on '{action['share']}'.")
             else:
                 print("Failed to change access level (or elevation was cancelled).")
+        elif kind == "group_access":
+            level = "read-only" if action["read_only"] else "read-write"
+            print(f"\n--- Setting '{action['group']}''s members to {level} on '{action['share']}' ---")
+            if self.wizard.change_group_access(action["group"], action["share"], action["read_only"]):
+                print(f"'{action['group']}''s members are now {level} on '{action['share']}'.")
+            else:
+                print("Failed to change access level (or elevation was cancelled).")
         elif kind == "delete_user":
             print(f"\n--- Deleting user '{action['username']}' ---")
             if self.wizard.remove_user(action["username"]):
@@ -387,6 +394,18 @@ class TUIWizard:
                 )
                 print(output, end="")
             print(f"'{username}' is now {level} on '{share}'." if ok else "Failed to change access level.")
+        elif kind == "group_access":
+            group, share, read_only = action["group"], action["share"], action["read_only"]
+            level = "read-only" if read_only else "read-write"
+            print(f"--- Setting '{group}''s members to {level} on '{share}' ---")
+            if self.wizard.has_admin_privileges():
+                ok = self.wizard.set_group_access_level(group, share, read_only)
+            else:
+                ok, output = self.wizard._elevated_relaunch_capturing(
+                    "--change-group-access", {"group": group, "share": share, "read_only": read_only}
+                )
+                print(output, end="")
+            print(f"'{group}''s members are now {level} on '{share}'." if ok else "Failed to change access level.")
         elif kind == "revoke_access":
             share, username = action["share"], action["username"]
             print(f"--- Revoking '{username}''s access to '{share}' ---")
@@ -996,13 +1015,21 @@ class TUIWizard:
     def _users_screen_flow(self, stdscr):
         while True:
             users = self.wizard.list_users()
+            access_lookup = self.wizard.build_access_lookup(self.wizard.list_shares())
 
             # "+ New User" always available, even with no existing users -
             # a standalone account not attached to any share or group, so a
             # user doesn't have to create a throwaway share just to get an
             # account to exist.
             items = [("+ New User", [])] + [
-                (u["username"], [f"group: {g}" for g in u["groups"]] + [f"share: {s}" for s in u["shares"]])
+                (
+                    u["username"],
+                    [f"group: {g}" for g in u["groups"]]
+                    + [
+                        f"share: {s}" + (" (read-only)" if access_lookup.get((s, u["username"])) else "")
+                        for s in u["shares"]
+                    ],
+                )
                 for u in users
             ]
             idx = self._tree_menu(stdscr, "Users", items, subtitle="Select a user to manage")
@@ -1180,6 +1207,8 @@ class TUIWizard:
         sub_options = ["Add member"]
         if group["members"]:
             sub_options.append("Remove member")
+        if group["members"] and group["shares"]:
+            sub_options.append("Set Access Level")
         sub_options.append("Delete group")
         sub_idx = self._menu(
             stdscr, group["name"], sub_options,
@@ -1189,7 +1218,34 @@ class TUIWizard:
             return None
         choice = sub_options[sub_idx]
 
-        if choice == "Add member":
+        if choice == "Set Access Level":
+            # Bulk-applies to every CURRENT member of the group, right now -
+            # not a persistent group-level grant. Someone added to the
+            # group later doesn't automatically inherit this.
+            if len(group["shares"]) == 1:
+                share_name = group["shares"][0]
+            else:
+                sidx = self._menu(stdscr, "Set access level on which share?", group["shares"])
+                if sidx is None:
+                    return None
+                share_name = group["shares"][sidx]
+            level_choice = self._menu(
+                stdscr, f"Set every current member of '{group['name']}' to:", ["Read-write", "Read-only"]
+            )
+            if level_choice is None:
+                return None
+            read_only = level_choice == 1
+            confirm = self._menu(
+                stdscr,
+                f"Apply {'read-only' if read_only else 'read-write'} to all "
+                f"{len(group['members'])} member(s) of '{group['name']}' on '{share_name}'?",
+                ["Yes, apply", "Cancel"],
+            )
+            if confirm != 0:
+                return None
+            action = {"action": "group_access", "group": group["name"], "share": share_name, "read_only": read_only}
+
+        elif choice == "Add member":
             # A pick-list of existing users, not free text: adding a member
             # requires an already-existing account (unlike a share's "Add
             # user", which can create one) - the underlying action validates
@@ -1233,6 +1289,7 @@ class TUIWizard:
             "delete_group": f"Deleting group '{action.get('name')}'...",
             "assign_group": f"Adding '{action.get('username')}' to '{action.get('group')}'...",
             "revoke_group": f"Removing '{action.get('username')}' from '{action.get('group')}'...",
+            "group_access": f"Setting access level for '{action.get('group')}' on '{action.get('share')}'...",
         }.get(action["action"], "Working...")
         self._run_privileged_action(stdscr, busy, lambda: self._users_groups_action_in_curses(action))
         return None

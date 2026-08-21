@@ -206,6 +206,43 @@ class SMBWizard:
             return self.set_share_user_access(share_name, username, read_only)
         return self.elevate_and_change_access(share_name, username, read_only)
 
+    @staticmethod
+    def build_access_lookup(shares):
+        # dict of (share_name, username) -> read_only, built from an
+        # already-fetched list_shares() result - callers that need this for
+        # several users/shares at once should fetch shares once and reuse
+        # this, rather than looking each one up individually (list_shares()
+        # isn't free - it's a live subprocess/file read on every call).
+        return {
+            (s["name"], u["username"]): u.get("read_only", False)
+            for s in shares for u in s.get("users", [])
+        }
+
+    def set_group_access_level(self, group_name, share_name, read_only):
+        # Bulk-applies read_only to every CURRENT member of group_name on
+        # share_name, one at a time via set_share_user_access - a one-time
+        # snapshot, not a persistent group-level grant. A user added to the
+        # group later doesn't automatically inherit this; re-run it (or set
+        # them individually) if that's needed. Deliberately this simple:
+        # groups aren't first-class access-control principals in Kelpie's
+        # model, individual users are - this is just a convenience for
+        # applying the same individual change to many of them at once.
+        # Requires root/admin; callers not already elevated should go
+        # through change_group_access() instead.
+        group = next((g for g in self.list_groups() if g["name"] == group_name), None)
+        if not group:
+            return False
+        ok = True
+        for username in group["members"]:
+            if not self.set_share_user_access(share_name, username, read_only):
+                ok = False
+        return ok
+
+    def change_group_access(self, group_name, share_name, read_only):
+        if self.has_admin_privileges():
+            return self.set_group_access_level(group_name, share_name, read_only)
+        return self.elevate_and_change_group_access(group_name, share_name, read_only)
+
     def remove_user_from_share(self, share_name, username):
         # Requires root. Revokes access to one share only (valid-users entry
         # + group membership) - the account itself, and its access to any
@@ -634,6 +671,11 @@ class SMBWizard:
             "--change-access", {"share": share_name, "username": username, "read_only": read_only}
         )
 
+    def elevate_and_change_group_access(self, group_name, share_name, read_only):
+        return self._elevated_relaunch(
+            "--change-group-access", {"group": group_name, "share": share_name, "read_only": read_only}
+        )
+
     def elevate_and_create_user(self, username, password):
         return self._elevated_relaunch("--create-user", {"username": username, "password": password})
 
@@ -729,6 +771,21 @@ class SMBWizard:
         wizard = SMBWizard()
         wizard._invoking_user_override = data.get('_invoking_user')
         wizard.set_share_user_access(data['share'], data['username'], data['read_only'])
+
+    @staticmethod
+    def change_group_access_from_file(path):
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+        wizard = SMBWizard()
+        wizard._invoking_user_override = data.get('_invoking_user')
+        wizard.set_group_access_level(data['group'], data['share'], data['read_only'])
 
     @staticmethod
     def revoke_share_access_from_file(path):

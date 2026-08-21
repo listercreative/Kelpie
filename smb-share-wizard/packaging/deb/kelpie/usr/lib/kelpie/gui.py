@@ -338,15 +338,24 @@ class GUIWizard:
         self.groups_list.configure(yscrollcommand=groups_scroll.set)
         groups_scroll.pack(side="right", fill="y", pady=4)
 
-        groups_btn_frame = ttk.Frame(frame)
-        groups_btn_frame.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Button(groups_btn_frame, text="Add Member...", command=self._add_group_member).pack(
+        # Two rows - four buttons packed side="left" don't reliably fit the
+        # default 560px window width (see the earlier users_btn_row1/2/3
+        # split for the same reason).
+        groups_btn_row1 = ttk.Frame(frame)
+        groups_btn_row1.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Button(groups_btn_row1, text="Add Member...", command=self._add_group_member).pack(
             side="left", padx=4
         )
-        ttk.Button(groups_btn_frame, text="Remove Member...", command=self._remove_group_member).pack(
+        ttk.Button(groups_btn_row1, text="Remove Member...", command=self._remove_group_member).pack(
             side="left", padx=4
         )
-        ttk.Button(groups_btn_frame, text="Delete Group", command=self._delete_selected_group).pack(
+
+        groups_btn_row2 = ttk.Frame(frame)
+        groups_btn_row2.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(
+            groups_btn_row2, text="Set Access Level...", command=self._set_access_level_for_group
+        ).pack(side="left", padx=4)
+        ttk.Button(groups_btn_row2, text="Delete Group", command=self._delete_selected_group).pack(
             side="left", padx=4
         )
 
@@ -396,7 +405,7 @@ class GUIWizard:
             padx=8, pady=(0, 8), anchor="w"
         )
 
-    def _populate_users_groups(self, groups, users):
+    def _populate_users_groups(self, groups, users, access_lookup):
         for item in self.groups_list.get_children():
             self.groups_list.delete(item)
         for g in groups:
@@ -413,10 +422,14 @@ class GUIWizard:
             for g in u["groups"]:
                 self.system_users_list.insert(uid, tk.END, text=f"group: {g}")
             for s in u["shares"]:
-                self.system_users_list.insert(uid, tk.END, text=f"share: {s}")
+                suffix = " (read-only)" if access_lookup.get((s, u["username"])) else ""
+                self.system_users_list.insert(uid, tk.END, text=f"share: {s}{suffix}")
 
     def _refresh_users_groups(self):
-        self._populate_users_groups(self.wizard.list_groups(), self.wizard.list_users())
+        shares = self.wizard.list_shares()
+        self._populate_users_groups(
+            self.wizard.list_groups(), self.wizard.list_users(), self.wizard.build_access_lookup(shares)
+        )
 
     def _refresh_all_lists(self):
         # Bound to <<NotebookTabChanged>> - fires on every tab click.
@@ -432,9 +445,11 @@ class GUIWizard:
         groups = self.wizard.list_groups()
         users = self.wizard.list_users()
 
+        access_lookup = self.wizard.build_access_lookup(shares)
+
         def apply():
             self._populate_shares_list(shares)
-            self._populate_users_groups(groups, users)
+            self._populate_users_groups(groups, users, access_lookup)
 
         self.root.after(0, apply)
 
@@ -757,6 +772,74 @@ class GUIWizard:
             messagebox.showinfo("Removed", f"Removed '{username}' from group '{group_name}'.")
         else:
             messagebox.showerror("Failed", f"Could not remove '{username}' from group '{group_name}' — see log.")
+        self._refresh_all_lists()
+
+    def _set_access_level_for_group(self):
+        # Bulk-applies to every CURRENT member of the group, right now - not
+        # a persistent group-level grant. Someone added to the group later
+        # doesn't automatically inherit this.
+        group_name = self._selected_top_level_text(self.groups_list)
+        if not group_name:
+            messagebox.showinfo("Set Access Level", "Select a group first.")
+            return
+        group = next((g for g in self.wizard.list_groups() if g["name"] == group_name), None)
+        if not group or not group["members"]:
+            messagebox.showinfo("Set Access Level", f"'{group_name}' has no members yet.")
+            return
+        if not group["shares"]:
+            messagebox.showinfo("Set Access Level", f"'{group_name}' isn't attached to any share.")
+            return
+
+        if len(group["shares"]) == 1:
+            share_name = group["shares"][0]
+        else:
+            dialog = ChoiceDialog(
+                self.root, "Choose share", f"Set access level on which share for '{group_name}'?",
+                group["shares"], ok_label="Next"
+            )
+            if not dialog.result:
+                return
+            share_name = dialog.result
+
+        dialog = ChoiceDialog(
+            self.root, "Access level", f"Set every current member of '{group_name}' to:",
+            ["Read-write", "Read-only"], ok_label="Apply"
+        )
+        if not dialog.result:
+            return
+        read_only = dialog.result == "Read-only"
+
+        if not messagebox.askyesno(
+            "Set Access Level",
+            f"Apply {dialog.result.lower()} access to all {len(group['members'])} current member(s) "
+            f"of '{group_name}' on '{share_name}'?",
+        ):
+            return
+
+        threading.Thread(
+            target=self._set_group_access_worker, args=(group_name, share_name, read_only), daemon=True
+        ).start()
+
+    def _set_group_access_worker(self, group_name, share_name, read_only):
+        buffer = io.StringIO()
+        ok = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                ok = self.wizard.change_group_access(group_name, share_name, read_only)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(
+            0, lambda: self._set_group_access_done(group_name, share_name, read_only, ok, buffer.getvalue())
+        )
+
+    def _set_group_access_done(self, group_name, share_name, read_only, ok, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        level = "read-only" if read_only else "read-write"
+        if ok:
+            messagebox.showinfo("Done", f"Set '{group_name}''s members to {level} on '{share_name}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not change access level for '{group_name}' — see log.")
         self._refresh_all_lists()
 
     def _revoke_selected_user_access(self):

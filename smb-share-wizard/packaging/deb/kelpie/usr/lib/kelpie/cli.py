@@ -161,6 +161,7 @@ class CLIWizard(SMBWizard):
         # and this instead matches how manage_shares() already works.
         while True:
             users = self.list_users()
+            access_lookup = self.build_access_lookup(self.list_shares())
 
             console.print("\n[bold]--- Users ---[/bold]")
             if not users:
@@ -170,7 +171,8 @@ class CLIWizard(SMBWizard):
                 for g in u["groups"]:
                     print(f"\tgroup: {g}")
                 for s in u["shares"]:
-                    print(f"\tshare: {s}")
+                    suffix = " (read-only)" if access_lookup.get((s, u["username"])) else ""
+                    print(f"\tshare: {s}{suffix}")
 
             choice = input(
                 "\nEnter a user number to manage, 'n' for a new user, or press Enter to return: "
@@ -362,6 +364,8 @@ class CLIWizard(SMBWizard):
             sub_options = ["Add member"]
             if group["members"]:
                 sub_options.append("Remove member")
+            if group["members"] and group["shares"]:
+                sub_options.append("Set Access Level")
             sub_options.append("Delete group")
             sub_options.append("Back")
 
@@ -411,6 +415,36 @@ class CLIWizard(SMBWizard):
                     print(f"Removed '{member_name}' from group '{group['name']}'.")
                 else:
                     print("Failed to remove member (or elevation was cancelled).")
+            elif action == "Set Access Level":
+                # Bulk-applies to every CURRENT member of the group, right
+                # now - not a persistent group-level grant. Someone added
+                # to the group later doesn't automatically inherit this.
+                if len(group["shares"]) == 1:
+                    share_name = group["shares"][0]
+                else:
+                    print("Shares:")
+                    for si, sname in enumerate(group["shares"]):
+                        print(f"  {si}. {sname}")
+                    sidx = input("Set access level on which share? ").strip()
+                    if not sidx.isdigit() or not (0 <= int(sidx) < len(group["shares"])):
+                        print("Invalid share number.")
+                        continue
+                    share_name = group["shares"][int(sidx)]
+                level = input("Set every current member to (r)ead-write or (o)nly read-only? [r/o] ").strip().lower()
+                if level not in ('r', 'o'):
+                    print("Invalid option.")
+                    continue
+                read_only = level == 'o'
+                confirm = input(
+                    f"Apply {'read-only' if read_only else 'read-write'} access to all "
+                    f"{len(group['members'])} current member(s) of '{group['name']}' on '{share_name}'? [y/N] "
+                ).strip().lower()
+                if confirm not in ('y', 'yes'):
+                    continue
+                if self.change_group_access(group['name'], share_name, read_only):
+                    print(f"Set '{group['name']}''s members to {'read-only' if read_only else 'read-write'} on '{share_name}'.")
+                else:
+                    print("Failed to change access level (or elevation was cancelled).")
             else:
                 confirm = input(f"Delete group '{group['name']}'? [y/N] ").strip().lower()
                 if confirm not in ('y', 'yes'):
