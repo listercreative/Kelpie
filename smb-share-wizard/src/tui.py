@@ -485,8 +485,9 @@ class TUIWizard:
         while thread.is_alive():
             stdscr.erase()
             h, w = stdscr.getmaxyx()
+            text = f"{busy_message} {frames[i % len(frames)]}"[:w - 4]
             try:
-                stdscr.addstr(1, 2, f"{busy_message} {frames[i % len(frames)]}"[:w - 4])
+                stdscr.addstr(h // 2, max(2, (w - len(text)) // 2), text)
             except curses.error:
                 pass
             stdscr.refresh()
@@ -746,20 +747,38 @@ class TUIWizard:
                 return None
 
     def _text_input(self, stdscr, prompt, password=False):
+        # Block-centered like _menu/_message - this used to hardcode
+        # row 0, col 2 (top-left corner) regardless of screen size, the
+        # only one of the TUI's screens that wasn't centered.
         curses.curs_set(1)
         stdscr.keypad(True)
         buf = []
+        prompt_lines = prompt.split("\n")
+        # Fixed to the prompt's own width, not the growing input text -
+        # otherwise the whole block would shift horizontally as you type.
         while True:
             stdscr.erase()
             h, w = stdscr.getmaxyx()
-            stdscr.addstr(0, 2, prompt[:w - 4], curses.A_BOLD)
             shown = ("*" * len(buf)) if password else "".join(buf)
+
+            content_width = min(max(len(l) for l in prompt_lines), w - 4)
+            col = max(2, (w - content_width) // 2)
+            content_rows = len(prompt_lines) + 2  # prompt line(s) + spacer + input line
+            row = max(1, (h - content_rows - 2) // 2)
+
+            for i, line in enumerate(prompt_lines):
+                try:
+                    stdscr.addstr(row + i, col, line[:w - 4], curses.A_BOLD)
+                except curses.error:
+                    pass
+            input_row = row + len(prompt_lines) + 1
             try:
-                stdscr.addstr(2, 2, shown[:w - 4])
-                stdscr.addstr(h - 1, 2, "Enter: confirm  Esc: cancel"[:w - 4], curses.A_DIM)
+                stdscr.addstr(input_row, col, shown[:w - 4])
+                footer = "Enter: confirm  Esc: cancel"
+                stdscr.addstr(h - 1, max(2, (w - len(footer)) // 2), footer[:w - 4], curses.A_DIM)
             except curses.error:
                 pass
-            stdscr.move(2, min(2 + len(shown), w - 2))
+            stdscr.move(input_row, min(col + len(shown), w - 2))
             stdscr.refresh()
 
             key = stdscr.getch()
