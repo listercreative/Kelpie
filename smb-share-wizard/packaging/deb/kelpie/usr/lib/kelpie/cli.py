@@ -139,6 +139,11 @@ class CLIWizard(SMBWizard):
                 print("Invalid option.")
 
     def _manage_users_screen(self):
+        # Two-step picker throughout (pick the user by number, then a
+        # numbered menu of just that user's actions) rather than the old
+        # letter+concatenated-number shorthand ("q0", "a2", ...) - that
+        # convention reads as unclear (users tried typing "<n>" literally),
+        # and this instead matches how manage_shares() already works.
         while True:
             users = self.list_users()
 
@@ -146,19 +151,15 @@ class CLIWizard(SMBWizard):
             if not users:
                 print("No users found.")
             for i, u in enumerate(users):
-                print(f"U{i}. {u['username']}")
+                print(f"{i}. {u['username']}")
                 for g in u["groups"]:
                     print(f"\tgroup: {g}")
                 for s in u["shares"]:
                     print(f"\tshare: {s}")
 
-            print("\nn = create a new user (not attached to any share or group)")
-            print("a<n> = assign to a(nother) group")
-            print("g<n> = remove from a group")
-            print("r<n> = revoke access to a share")
-            print("q<n> = reset password & show QR code")
-            print("d<n> = delete the user entirely")
-            choice = input("Select an option, or press Enter to return: ").strip().lower()
+            choice = input(
+                "\nEnter a user number to manage, 'n' for a new user, or press Enter to return: "
+            ).strip().lower()
             if not choice:
                 return
 
@@ -180,19 +181,32 @@ class CLIWizard(SMBWizard):
                     print("Failed to create user (or elevation was cancelled).")
                 continue
 
-            kind, rest = choice[0], choice[1:]
-            if kind not in ('a', 'g', 'r', 'q', 'd') or not rest.isdigit() or not (0 <= int(rest) < len(users)):
-                # "<n>" in the menu above is a placeholder to replace with
-                # an actual number, not literal text - spell out a concrete
-                # example, since typing it verbatim is an easy first mistake.
-                if users:
-                    print(f"Invalid option. '<n>' means the user's number - e.g. 'q0' for U0 ({users[0]['username']}).")
-                else:
-                    print("Invalid option.")
+            if not choice.isdigit() or not (0 <= int(choice) < len(users)):
+                print("Invalid option.")
                 continue
-            user = users[int(rest)]
+            user = users[int(choice)]
 
-            if kind == 'a':
+            sub_options = ["Assign to group"]
+            if user["groups"]:
+                sub_options.append("Remove from group")
+            if user["shares"]:
+                sub_options.append("Revoke share access")
+                sub_options.append("Reset Password & Show QR")
+            sub_options.append("Delete user")
+            sub_options.append("Back")
+
+            print(f"\n--- {user['username']} ---")
+            for si, label in enumerate(sub_options, start=1):
+                print(f"{si}. {label}")
+            sub = input("Select an option: ").strip()
+            if not sub.isdigit() or not (1 <= int(sub) <= len(sub_options)):
+                print("Invalid option.")
+                continue
+            action = sub_options[int(sub) - 1]
+
+            if action == "Back":
+                continue
+            elif action == "Assign to group":
                 groups = self.list_groups()
                 if not groups:
                     print("No groups exist to assign to.")
@@ -209,10 +223,7 @@ class CLIWizard(SMBWizard):
                     print(f"Added '{user['username']}' to group '{group_name}'.")
                 else:
                     print("Failed to assign group (or elevation was cancelled).")
-            elif kind == 'g':
-                if not user["groups"]:
-                    print(f"'{user['username']}' isn't in any group.")
-                    continue
+            elif action == "Remove from group":
                 print("Groups:")
                 for gi, gname in enumerate(user["groups"]):
                     print(f"  {gi}. {gname}")
@@ -225,10 +236,7 @@ class CLIWizard(SMBWizard):
                     print(f"Removed '{user['username']}' from group '{group_name}'.")
                 else:
                     print("Failed to remove from group (or elevation was cancelled).")
-            elif kind == 'r':
-                if not user["shares"]:
-                    print(f"'{user['username']}' has no share access to revoke.")
-                    continue
+            elif action == "Revoke share access":
                 print("Shares:")
                 for si, sname in enumerate(user["shares"]):
                     print(f"  {si}. {sname}")
@@ -241,10 +249,7 @@ class CLIWizard(SMBWizard):
                     print(f"Revoked '{user['username']}''s access to '{share_name}'.")
                 else:
                     print("Failed to revoke access (or elevation was cancelled).")
-            elif kind == 'q':
-                if not user["shares"]:
-                    print(f"'{user['username']}' has no share access to generate a QR code for.")
-                    continue
+            elif action == "Reset Password & Show QR":
                 # Same underlying operation "Add user" performs when the
                 # user already exists - grant_share_access resets the
                 # password rather than failing.
@@ -281,6 +286,8 @@ class CLIWizard(SMBWizard):
                     print("Failed to delete user (or elevation was cancelled).")
 
     def _manage_groups_screen(self):
+        # Same two-step picker as _manage_users_screen: pick the group by
+        # number, then a numbered menu of just that group's actions.
         while True:
             groups = self.list_groups()
 
@@ -289,26 +296,38 @@ class CLIWizard(SMBWizard):
                 print("No managed groups found.")
                 return
             for i, g in enumerate(groups):
-                print(f"G{i}. {g['name']}")
+                print(f"{i}. {g['name']}")
                 for m in g["members"]:
                     print(f"\tuser: {m}")
                 for s in g["shares"]:
                     print(f"\tshare: {s}")
 
-            print("\nm<n> = add a member")
-            print("v<n> = remove a member")
-            print("x<n> = delete the group")
-            choice = input("Select an option, or press Enter to return: ").strip().lower()
+            choice = input("\nEnter a group number to manage, or press Enter to return: ").strip()
             if not choice:
                 return
-
-            kind, rest = choice[0], choice[1:]
-            if kind not in ('m', 'v', 'x') or not rest.isdigit() or not (0 <= int(rest) < len(groups)):
+            if not choice.isdigit() or not (0 <= int(choice) < len(groups)):
                 print("Invalid option.")
                 continue
-            group = groups[int(rest)]
+            group = groups[int(choice)]
 
-            if kind == 'm':
+            sub_options = ["Add member"]
+            if group["members"]:
+                sub_options.append("Remove member")
+            sub_options.append("Delete group")
+            sub_options.append("Back")
+
+            print(f"\n--- {group['name']} ---")
+            for si, label in enumerate(sub_options, start=1):
+                print(f"{si}. {label}")
+            sub = input("Select an option: ").strip()
+            if not sub.isdigit() or not (1 <= int(sub) <= len(sub_options)):
+                print("Invalid option.")
+                continue
+            action = sub_options[int(sub) - 1]
+
+            if action == "Back":
+                continue
+            elif action == "Add member":
                 # A pick-list of existing users, not free text: adding a
                 # member requires an already-existing account (unlike a
                 # share's "Add user", which can create one) - the underlying
@@ -330,10 +349,7 @@ class CLIWizard(SMBWizard):
                     print(f"Added '{username}' to group '{group['name']}'.")
                 else:
                     print("Failed to add member (or elevation was cancelled).")
-            elif kind == 'v':
-                if not group["members"]:
-                    print(f"'{group['name']}' has no members.")
-                    continue
+            elif action == "Remove member":
                 print("Members:")
                 for mi, mname in enumerate(group["members"]):
                     print(f"  {mi}. {mname}")
