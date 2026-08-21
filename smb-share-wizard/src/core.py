@@ -167,21 +167,44 @@ class SMBWizard:
             return self.create_user(username, password)
         return self.elevate_and_create_user(username, password)
 
-    def add_user_to_share(self, share_name, username, password):
+    def add_user_to_share(self, share_name, username, password, read_only=False):
         # Requires root. Callers not already elevated should go through
         # grant_share_access() instead, which handles that.
         if self.system == "Linux":
-            return self._add_user_to_share_linux(share_name, username, password)
+            return self._add_user_to_share_linux(share_name, username, password, read_only)
         elif self.system == "Darwin":
-            return self._add_user_to_share_macos(share_name, username, password)
+            return self._add_user_to_share_macos(share_name, username, password, read_only)
         elif self.system == "Windows":
-            return self._add_user_to_share_windows(share_name, username, password)
+            return self._add_user_to_share_windows(share_name, username, password, read_only)
         return False
 
-    def grant_share_access(self, share_name, username, password):
+    def grant_share_access(self, share_name, username, password, read_only=False):
         if self.has_admin_privileges():
-            return self.add_user_to_share(share_name, username, password)
-        return self.elevate_and_grant_access(share_name, username, password)
+            return self.add_user_to_share(share_name, username, password, read_only)
+        return self.elevate_and_grant_access(share_name, username, password, read_only)
+
+    def set_share_user_access(self, share_name, username, read_only):
+        # Changes an existing share user's read-only status without
+        # touching their password or group membership - the "change access
+        # level later" action. Requires root/admin; callers not already
+        # elevated should go through change_share_access() instead.
+        if self.system == "Linux":
+            self._set_read_only_linux(share_name, username, read_only)
+        elif self.system == "Darwin":
+            share = next((s for s in self.list_shares() if s["name"] == share_name), None)
+            if not share or not share.get("path"):
+                return False
+            self._set_read_only_macos(share["path"], username, read_only)
+        elif self.system == "Windows":
+            self._set_windows_share_access(share_name, username, read_only)
+        else:
+            return False
+        return True
+
+    def change_share_access(self, share_name, username, read_only):
+        if self.has_admin_privileges():
+            return self.set_share_user_access(share_name, username, read_only)
+        return self.elevate_and_change_access(share_name, username, read_only)
 
     def remove_user_from_share(self, share_name, username):
         # Requires root. Revokes access to one share only (valid-users entry
@@ -601,9 +624,14 @@ class SMBWizard:
     def elevate_and_delete(self, name, delete_folder=False):
         return self._elevated_relaunch("--delete-share", {"name": name, "delete_folder": delete_folder})
 
-    def elevate_and_grant_access(self, share_name, username, password):
+    def elevate_and_grant_access(self, share_name, username, password, read_only=False):
         return self._elevated_relaunch(
-            "--add-user", {"share": share_name, "username": username, "password": password}
+            "--add-user", {"share": share_name, "username": username, "password": password, "read_only": read_only}
+        )
+
+    def elevate_and_change_access(self, share_name, username, read_only):
+        return self._elevated_relaunch(
+            "--change-access", {"share": share_name, "username": username, "read_only": read_only}
         )
 
     def elevate_and_create_user(self, username, password):
@@ -685,7 +713,22 @@ class SMBWizard:
 
         wizard = SMBWizard()
         wizard._invoking_user_override = data.get('_invoking_user')
-        wizard.add_user_to_share(data['share'], data['username'], data['password'])
+        wizard.add_user_to_share(data['share'], data['username'], data['password'], data.get('read_only', False))
+
+    @staticmethod
+    def change_access_from_file(path):
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+        wizard = SMBWizard()
+        wizard._invoking_user_override = data.get('_invoking_user')
+        wizard.set_share_user_access(data['share'], data['username'], data['read_only'])
 
     @staticmethod
     def revoke_share_access_from_file(path):
@@ -999,29 +1042,39 @@ Remove-Item $cfgPath,$dbPath -ErrorAction SilentlyContinue
                 self._configure_windows_user(username, user['password'])
                 self._add_windows_user_to_group(username, group_name)
 
+            # NTFS permissions are granted to the whole group regardless of
+            # each member's read-only status - same as Linux's POSIX perms
+            # being writable while "read list" downgrades specific users at
+            # the SMB layer. This is the ceiling; per-user SMB share access
+            # below (Full vs Read) is what actually caps a read-only user,
+            # not the filesystem layer.
             print(f"  - Granting NTFS permissions to '{group_name}' on '{self.share_path}'...")
             self._grant_windows_ntfs_permissions(self.share_path, group_name)
 
             print("  - Ensuring Windows Firewall allows SMB access...")
             self._ensure_windows_firewall_and_network()
 
-            print(f"  - Creating share '{self.share_name}' with FullAccess for '{group_name}'...")
+            print(f"  - Creating share '{self.share_name}'...")
             escaped_share = self._ps_quote(self.share_name)
             escaped_path = self._ps_quote(self.share_path)
-            escaped_group = self._ps_quote(group_name)
-            # Idempotent, not silenced: -ErrorAction SilentlyContinue on a
-            # bare New-SmbShare both hid the real error on any genuine
-            # failure (empty stderr - no diagnostic to go on) and wasn't
-            # actually idempotent - if a share by this name already existed
-            # (e.g. a stale one left over from earlier testing), it did
-            # nothing at all, never granting the new group access.
+            # Per-user SMB share access (Full or Read), not group-wide -
+            # Windows unions permissions from every applicable source, so a
+            # blanket FullAccess grant to the group would make any
+            # individual read-only downgrade below meaningless (the group
+            # grant would always win). -FullAccess Administrators here is
+            # just to satisfy New-SmbShare needing *some* access parameter
+            # (omitting one risks defaulting to "Everyone: Read" on some
+            # Windows versions) - it grants nothing to Kelpie-created users,
+            # who are never members of Administrators.
             cmd = (
                 f"if (-not (Get-SmbShare -Name '{escaped_share}' -ErrorAction SilentlyContinue)) {{ "
-                f"New-SmbShare -Name '{escaped_share}' -Path '{escaped_path}' -FullAccess '{escaped_group}' "
-                f"}} else {{ Grant-SmbShareAccess -Name '{escaped_share}' -AccountName '{escaped_group}' "
-                f"-AccessRight Full -Force }}"
+                f"New-SmbShare -Name '{escaped_share}' -Path '{escaped_path}' -FullAccess 'Administrators' "
+                f"}}"
             )
             _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
+
+            for user in self.users:
+                self._set_windows_share_access(self.share_name, user['username'], user.get('read_only', False))
 
             print("[Windows] Success.")
         except subprocess.CalledProcessError as e:
@@ -1076,8 +1129,8 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
         cmd = (
             "Get-SmbShare | Where-Object { $_.Name -notin @('ADMIN$','C$','IPC$','print$') } "
             "| ForEach-Object { "
-            "[PSCustomObject]@{ Name = $_.Name; Path = $_.Path; "
-            "Access = (Get-SmbShareAccess -Name $_.Name | Select-Object -ExpandProperty AccountName) } "
+            "$access = Get-SmbShareAccess -Name $_.Name | Select-Object AccountName,AccessRight; "
+            "[PSCustomObject]@{ Name = $_.Name; Path = $_.Path; Access = $access } "
             "} | ConvertTo-Json -Compress -Depth 4"
         )
         proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
@@ -1090,19 +1143,31 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
         if isinstance(data, dict):
             data = [data]
 
+        # Housekeeping/placeholder accounts that can show up in a share's
+        # SMB ACL but were never a Kelpie-managed per-user grant - never
+        # surfaced as if they were a real share user.
+        non_user_accounts = {"Administrators", "Everyone", "SYSTEM", "Authenticated Users"}
+
         shares = []
         for s in data:
             share = {"name": s["Name"], "path": s.get("Path", ""), "users": [], "group": None}
-            # run_windows() only ever grants FullAccess to the one
-            # Kelpie-created group (individual users are members of it, not
-            # granted directly), so the share's access is entirely
-            # represented by that one group - same shape as the
-            # Linux/macOS "group" field.
-            for account in self._as_list(s.get("Access")):
+            for entry in self._as_list(s.get("Access")):
+                account = entry.get("AccountName", "")
                 name = account.split("\\")[-1]
                 if name.startswith("Kelpie_"):
                     share["group"] = name
-                    break
+                    continue
+                if name in non_user_accounts:
+                    continue
+                # run_windows()/_set_windows_share_access() only ever grant
+                # Full or Read directly - per-user, not via the group (see
+                # run_windows()'s comment on why: Windows unions permissions
+                # from every applicable source, so a group-wide grant would
+                # make an individual downgrade meaningless).
+                share["users"].append({
+                    "username": name,
+                    "read_only": entry.get("AccessRight") not in ("Full", "Change"),
+                })
             shares.append(share)
         return shares
 
@@ -1152,7 +1217,26 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
         proc = _run(["powershell", "-Command", cmd], capture_output=True, text=True)
         return proc.returncode == 0
 
-    def _add_user_to_share_windows(self, share_name, username, password):
+    def _set_windows_share_access(self, share_name, username, read_only):
+        # Per-user SMB share access level - see run_windows()'s comment on
+        # why this is per-account rather than via the group. Revoke first:
+        # Grant-SmbShareAccess is additive, so calling it again for an
+        # account that already has an entry would leave two ACEs (e.g. an
+        # old Full alongside a new Read) instead of cleanly replacing one
+        # with the other - this is also what makes changing an existing
+        # user's access level later idempotent and safe to re-run.
+        escaped_share = self._ps_quote(share_name)
+        escaped_user = self._ps_quote(username)
+        right = "Read" if read_only else "Full"
+        cmd = (
+            f"Revoke-SmbShareAccess -Name '{escaped_share}' -AccountName '{escaped_user}' "
+            f"-Force -ErrorAction SilentlyContinue | Out-Null; "
+            f"Grant-SmbShareAccess -Name '{escaped_share}' -AccountName '{escaped_user}' "
+            f"-AccessRight {right} -Force"
+        )
+        _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
+
+    def _add_user_to_share_windows(self, share_name, username, password, read_only=False):
         shares = {s["name"]: s for s in self._list_shares_windows()}
         share = shares.get(share_name)
         if not share:
@@ -1164,6 +1248,7 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
         group_name = share.get("group") or self._windows_group_name(share_name)
         self._ensure_windows_group(group_name)
         self._add_windows_user_to_group(username, group_name)
+        self._set_windows_share_access(share_name, username, read_only)
 
         print(f"[Windows] Added '{username}' to share '{share_name}'.")
         return True
@@ -1181,6 +1266,11 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
                 f"-Member '{self._ps_quote(username)}' -ErrorAction SilentlyContinue"
             )
             _run(["powershell", "-Command", cmd], capture_output=True, text=True)
+        revoke_cmd = (
+            f"Revoke-SmbShareAccess -Name '{self._ps_quote(share_name)}' "
+            f"-AccountName '{self._ps_quote(username)}' -Force -ErrorAction SilentlyContinue"
+        )
+        _run(["powershell", "-Command", revoke_cmd], capture_output=True, text=True)
         print(f"[Windows] Removed '{username}' from share '{share_name}'.")
         return True
 
@@ -1295,7 +1385,8 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
             except subprocess.CalledProcessError as e:
                 print(f"[Linux] Enabled NetBIOS but failed to start the name-service daemon: {e.stderr if e.stderr else e}")
 
-    def _add_samba_share_config(self, share_name, share_path, usernames):
+    def _add_samba_share_config(self, share_name, share_path, users):
+        # users: [{"username": ..., "read_only": bool}, ...]
         smb_conf = "/etc/samba/smb.conf"
         existing = ""
         if os.path.exists(smb_conf):
@@ -1304,6 +1395,8 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
         if f"[{share_name}]" in existing:
             print(f"[Linux] Share block for '{share_name}' already exists in {smb_conf}, skipping.")
             return
+        usernames = [u['username'] for u in users]
+        read_only_usernames = [u['username'] for u in users if u.get('read_only')]
         # An empty "valid users" line means UNSET to Samba - no restriction
         # at all, open to every Samba user - not "nobody". Write the same
         # unmatchable placeholder _rewrite_valid_users uses for that case,
@@ -1318,6 +1411,11 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
             f"    guest ok = no\n"
             f"    valid users = {' '.join(valid_users)}\n"
         )
+        # "read list" downgrades specific valid users to read-only despite
+        # "read only = no" above - Samba's per-user access-level mechanism,
+        # not a POSIX/filesystem permission.
+        if read_only_usernames:
+            block += f"    read list = {' '.join(read_only_usernames)}\n"
         with open(smb_conf, 'a') as f:
             f.write(block)
         print(f"[Linux] Appended share definition to {smb_conf}")
@@ -1469,7 +1567,7 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
             path_existed_before = os.path.isdir(self.share_path)
             os.makedirs(self.share_path, exist_ok=True)
 
-            self._add_samba_share_config(self.share_name, self.share_path, [u['username'] for u in self.users])
+            self._add_samba_share_config(self.share_name, self.share_path, self.users)
 
             group_name = self._share_group_name(self.share_name)
             self._ensure_group(group_name)
@@ -1514,7 +1612,7 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
                     continue
                 if line.startswith('[') and line.endswith(']'):
                     flush()
-                    current = {"name": line[1:-1].strip(), "path": "", "users": []}
+                    current = {"name": line[1:-1].strip(), "path": "", "users": [], "_read_only": []}
                     continue
                 if current is None or '=' not in line:
                     continue
@@ -1527,9 +1625,14 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
                     current["users"] = [
                         {"username": u} for u in value.split() if u != self._NO_USERS_PLACEHOLDER
                     ]
+                elif key == 'read list':
+                    current["_read_only"] = value.split()
         flush()
         for share in shares:
             share["group"] = self._group_for_path(share.get("path"))
+            read_only_usernames = share.pop("_read_only")
+            for user in share["users"]:
+                user["read_only"] = user["username"] in read_only_usernames
         return shares
 
     def _delete_share_linux(self, name):
@@ -1617,7 +1720,66 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
     def _remove_valid_user_from_smb_conf(self, share_name, username):
         self._rewrite_valid_users(share_name, lambda users: [u for u in users if u != username])
 
-    def _add_user_to_share_linux(self, share_name, username, password):
+    def _rewrite_read_list(self, share_name, mutate):
+        # "read list" is Samba's per-user override that downgrades specific
+        # valid users to read-only even though the share's own "read only =
+        # no" makes it writable overall - the mechanism this project uses
+        # for per-user (not per-share) access levels. Unlike valid users, an
+        # empty/absent read list is perfectly fine as-is (nobody's
+        # downgraded, not "no restriction" the way an empty valid users
+        # line would be), so this can just omit the line entirely rather
+        # than needing a placeholder. Handles both cases in one pass: the
+        # line already existing in this share's block, and it never having
+        # existed yet (shares created before this feature, or that never
+        # had a read-only user) - inserted right after the share header the
+        # first time it's actually needed.
+        smb_conf = "/etc/samba/smb.conf"
+        if not os.path.exists(smb_conf):
+            return
+        with open(smb_conf, 'r') as f:
+            lines = f.readlines()
+
+        target = f"[{share_name}]".lower()
+        out = []
+        in_target = False
+        found_line = False
+        header_index = None
+        for raw_line in lines:
+            stripped = raw_line.strip()
+            if stripped.startswith('[') and stripped.endswith(']'):
+                in_target = stripped.lower() == target
+                out.append(raw_line)
+                if in_target:
+                    header_index = len(out) - 1
+                continue
+            if in_target and not found_line:
+                bare = stripped.split('#', 1)[0].split(';', 1)[0].strip()
+                if '=' in bare and bare.split('=', 1)[0].strip().lower() == 'read list':
+                    existing = bare.split('=', 1)[1].split()
+                    new_users = mutate(existing)
+                    found_line = True
+                    if new_users:
+                        out.append(f"    read list = {' '.join(new_users)}\n")
+                    continue
+            out.append(raw_line)
+
+        if not found_line and header_index is not None:
+            new_users = mutate([])
+            if new_users:
+                out.insert(header_index + 1, f"    read list = {' '.join(new_users)}\n")
+
+        with open(smb_conf, 'w') as f:
+            f.writelines(out)
+
+    def _set_read_only_linux(self, share_name, username, read_only):
+        def mutate(users):
+            users = [u for u in users if u != username]
+            if read_only:
+                users.append(username)
+            return users
+        self._rewrite_read_list(share_name, mutate)
+
+    def _add_user_to_share_linux(self, share_name, username, password, read_only=False):
         shares = {s["name"]: s for s in self._list_shares_linux()}
         share = shares.get(share_name)
         if not share:
@@ -1638,6 +1800,7 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
             self._grant_traversal_acl(path, group_name)
 
         self._add_valid_user_to_smb_conf(share_name, username)
+        self._set_read_only_linux(share_name, username, read_only)
 
         try:
             self._restart_samba_service()
@@ -1795,6 +1958,9 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
 
             self._expose_macos_share_directory(self.share_path, group_name, path_existed_before)
 
+            for user in self.users:
+                self._set_read_only_macos(self.share_path, user['username'], user.get('read_only', False))
+
             self._create_macos_share(self.share_name, self.share_path)
             self._enable_macos_smb_sharing()
 
@@ -1830,7 +1996,26 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
         proc = _run(["sharing", "-r", name], capture_output=True, text=True)
         return proc.returncode == 0
 
-    def _add_user_to_share_macos(self, share_name, username, password):
+    def _set_read_only_macos(self, share_path, username, read_only):
+        # macOS's `sharing` CLI has no per-user SMB access-level concept the
+        # way Samba's "read list" or Windows' per-account Grant-
+        # SmbShareAccess do - the closest equivalent is a filesystem ACL
+        # deny entry, which (unlike POSIX permission bits) takes precedence
+        # regardless of the share's group-level write access, same "layer
+        # that actually caps this specific user" role read list/per-user
+        # SMB grants play on the other two platforms. Unverified like every
+        # other macOS code path in this project - no test coverage.
+        deny_rights = "write,delete,append,writeattr,writeextattr,writesecurity,chown"
+        if read_only:
+            _run(
+                ["chmod", "+a", f"{username} deny {deny_rights}", share_path],
+                check=True, capture_output=True, text=True,
+            )
+        else:
+            # Not check=True: fine if this ACE was never there to begin with.
+            _run(["chmod", "-a", f"{username} deny {deny_rights}", share_path], capture_output=True, text=True)
+
+    def _add_user_to_share_macos(self, share_name, username, password, read_only=False):
         shares = {s["name"]: s for s in self._list_shares_macos()}
         share = shares.get(share_name)
         if not share:
@@ -1842,6 +2027,8 @@ Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -like '*Tailscale*' 
         group_name = share.get("group") or self._macos_group_name(share_name)
         self._ensure_macos_group(group_name)
         self._add_macos_user_to_group(username, group_name)
+        if share.get("path"):
+            self._set_read_only_macos(share["path"], username, read_only)
 
         print(f"[macOS] Added '{username}' to share '{share_name}'.")
         return True

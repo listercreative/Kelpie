@@ -22,7 +22,7 @@ def _center_over_parent(win, parent):
 
 
 class AddUserDialog(tk.Toplevel):
-    def __init__(self, parent, existing_usernames=()):
+    def __init__(self, parent, existing_usernames=(), show_access_level=True):
         super().__init__(parent)
         self.title("Add User")
         self.resizable(False, False)
@@ -47,8 +47,20 @@ class AddUserDialog(tk.Toplevel):
         self.confirm_entry = ttk.Entry(self, show="*")
         self.confirm_entry.grid(row=2, column=1, padx=8, pady=6)
 
+        # Only relevant when this user is being granted access to a share -
+        # not shown for standalone user creation, which has no share (and
+        # so no access level) to set at all.
+        self.show_access_level = show_access_level
+        self.read_only_var = tk.BooleanVar(value=False)
+        next_row = 3
+        if show_access_level:
+            ttk.Checkbutton(
+                self, text="Read-only access", variable=self.read_only_var
+            ).grid(row=3, column=0, columnspan=2, pady=(0, 6))
+            next_row = 4
+
         btn_frame = ttk.Frame(self)
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        btn_frame.grid(row=next_row, column=0, columnspan=2, pady=10)
         ttk.Button(btn_frame, text="OK", command=self._on_ok).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=4)
 
@@ -73,6 +85,8 @@ class AddUserDialog(tk.Toplevel):
             return
 
         self.result = {"username": username, "password": password}
+        if self.show_access_level:
+            self.result["read_only"] = self.read_only_var.get()
         self.destroy()
 
 
@@ -361,14 +375,20 @@ class GUIWizard:
         ).pack(side="left", padx=4)
 
         users_btn_row2 = ttk.Frame(frame)
-        users_btn_row2.pack(fill="x", padx=8, pady=(0, 4))
+        users_btn_row2.pack(fill="x", padx=8, pady=(0, 2))
         ttk.Button(users_btn_row2, text="Revoke Access...", command=self._revoke_selected_user_access).pack(
             side="left", padx=4
         )
         ttk.Button(
-            users_btn_row2, text="Reset Password & Show QR...", command=self._reset_password_for_selected_user
+            users_btn_row2, text="Change Access Level...", command=self._change_access_level_for_selected_user
         ).pack(side="left", padx=4)
-        ttk.Button(users_btn_row2, text="Delete User", command=self._delete_selected_user).pack(
+
+        users_btn_row3 = ttk.Frame(frame)
+        users_btn_row3.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(
+            users_btn_row3, text="Reset Password & Show QR...", command=self._reset_password_for_selected_user
+        ).pack(side="left", padx=4)
+        ttk.Button(users_btn_row3, text="Delete User", command=self._delete_selected_user).pack(
             side="left", padx=4
         )
 
@@ -465,7 +485,10 @@ class GUIWizard:
         for item in self.shares_list.get_children():
             self.shares_list.delete(item)
         for share in shares:
-            users = ", ".join(u["username"] for u in share.get("users", [])) or "(none)"
+            users = ", ".join(
+                u["username"] + (" (read-only)" if u.get("read_only") else "")
+                for u in share.get("users", [])
+            ) or "(none)"
             self.shares_list.insert(
                 "", tk.END, values=(share.get("name", "?"), share.get("path", "Unknown"), users)
             )
@@ -485,8 +508,9 @@ class GUIWizard:
             return
         username = dialog.result["username"]
         password = dialog.result["password"]
+        read_only = dialog.result.get("read_only", False)
         threading.Thread(
-            target=self._grant_access_worker, args=(share_name, username, password), daemon=True
+            target=self._grant_access_worker, args=(share_name, username, password, read_only), daemon=True
         ).start()
 
     def _reset_password_for_selected_user(self):
@@ -530,16 +554,78 @@ class GUIWizard:
         if not password:
             return
 
+        # Preserve the user's current access level on this share - a
+        # password reset shouldn't silently flip them back to read-write.
+        share = next((s for s in self.wizard.list_shares() if s["name"] == share_name), None)
+        share_user = next((u for u in (share or {}).get("users", []) if u["username"] == username), None)
+        read_only = share_user.get("read_only", False) if share_user else False
+
         threading.Thread(
-            target=self._grant_access_worker, args=(share_name, username, password), daemon=True
+            target=self._grant_access_worker, args=(share_name, username, password, read_only), daemon=True
         ).start()
 
-    def _grant_access_worker(self, share_name, username, password):
+    def _change_access_level_for_selected_user(self):
+        username = self._selected_top_level_text(self.system_users_list)
+        if not username:
+            messagebox.showinfo("Change Access Level", "Select a user first.")
+            return
+        user = next((u for u in self.wizard.list_users() if u["username"] == username), None)
+        shares = user.get("shares", []) if user else []
+        if not shares:
+            messagebox.showinfo("Change Access Level", f"'{username}' doesn't have access to any share yet.")
+            return
+
+        if len(shares) == 1:
+            share_name = shares[0]
+        else:
+            dialog = ChoiceDialog(
+                self.root, "Choose share", "Change access level for which share?", shares, ok_label="Next"
+            )
+            if not dialog.result:
+                return
+            share_name = dialog.result
+
+        share = next((s for s in self.wizard.list_shares() if s["name"] == share_name), None)
+        share_user = next((u for u in (share or {}).get("users", []) if u["username"] == username), None)
+        current_read_only = share_user.get("read_only", False) if share_user else False
+        current_label = "read-only" if current_read_only else "read-write"
+        new_label = "read-write" if current_read_only else "read-only"
+        if not messagebox.askyesno(
+            "Change Access Level",
+            f"'{username}' is currently {current_label} on '{share_name}'.\n\nChange to {new_label}?",
+        ):
+            return
+
+        threading.Thread(
+            target=self._change_access_worker, args=(share_name, username, not current_read_only), daemon=True
+        ).start()
+
+    def _change_access_worker(self, share_name, username, read_only):
+        buffer = io.StringIO()
+        changed = False
+        try:
+            with contextlib.redirect_stdout(buffer):
+                changed = self.wizard.change_share_access(share_name, username, read_only)
+        except Exception as e:
+            buffer.write(f"\nUnexpected error: {e}\n")
+        self.root.after(0, lambda: self._change_access_done(share_name, username, read_only, changed, buffer.getvalue()))
+
+    def _change_access_done(self, share_name, username, read_only, changed, log_output):
+        if log_output.strip():
+            self._append_log(log_output)
+        if changed:
+            level = "read-only" if read_only else "read-write"
+            messagebox.showinfo("Changed", f"'{username}' is now {level} on '{share_name}'.")
+        else:
+            messagebox.showerror("Failed", f"Could not change '{username}''s access level — see log.")
+        self._refresh_all_lists()
+
+    def _grant_access_worker(self, share_name, username, password, read_only=False):
         buffer = io.StringIO()
         added = False
         try:
             with contextlib.redirect_stdout(buffer):
-                added = self.wizard.grant_share_access(share_name, username, password)
+                added = self.wizard.grant_share_access(share_name, username, password, read_only)
         except Exception as e:
             buffer.write(f"\nUnexpected error: {e}\n")
         self.root.after(
@@ -747,7 +833,7 @@ class GUIWizard:
         # instead of forcing a throwaway share into existence just to get
         # the account created.
         existing = [u["username"] for u in self.wizard.list_users()]
-        dialog = AddUserDialog(self.root, existing_usernames=existing)
+        dialog = AddUserDialog(self.root, existing_usernames=existing, show_access_level=False)
         if not dialog.result:
             return
         username = dialog.result["username"]

@@ -211,7 +211,7 @@ class TUIWizard:
     def _add_user_outside_curses(self, action):
         share, username = action["share"], action["username"]
         print(f"\n--- Adding '{username}' to share '{share}' ---")
-        if self.wizard.grant_share_access(share, username, action["password"]):
+        if self.wizard.grant_share_access(share, username, action["password"], action.get("read_only", False)):
             print(f"Added '{username}' to share '{share}'.")
             self._offer_qr_code_plain(share, username, action["password"])
         else:
@@ -285,6 +285,13 @@ class TUIWizard:
                 print("Revoked access.")
             else:
                 print("Failed to revoke access (or elevation was cancelled).")
+        elif kind == "change_access":
+            level = "read-only" if action["read_only"] else "read-write"
+            print(f"\n--- Changing '{action['username']}''s access on '{action['share']}' to {level} ---")
+            if self.wizard.change_share_access(action["share"], action["username"], action["read_only"]):
+                print(f"'{action['username']}' is now {level} on '{action['share']}'.")
+            else:
+                print("Failed to change access level (or elevation was cancelled).")
         elif kind == "delete_user":
             print(f"\n--- Deleting user '{action['username']}' ---")
             if self.wizard.remove_user(action["username"]):
@@ -344,12 +351,13 @@ class TUIWizard:
 
     def _add_user_in_curses(self, action):
         share, username, password = action["share"], action["username"], action["password"]
+        read_only = action.get("read_only", False)
         print(f"--- Adding '{username}' to share '{share}' ---")
         if self.wizard.has_admin_privileges():
-            ok = self.wizard.add_user_to_share(share, username, password)
+            ok = self.wizard.add_user_to_share(share, username, password, read_only)
         else:
             ok, output = self.wizard._elevated_relaunch_capturing(
-                "--add-user", {"share": share, "username": username, "password": password}
+                "--add-user", {"share": share, "username": username, "password": password, "read_only": read_only}
             )
             print(output, end="")
         print(f"Added '{username}' to share '{share}'." if ok else "Failed to add user.")
@@ -367,6 +375,18 @@ class TUIWizard:
                 )
                 print(output, end="")
             print(f"Created user '{username}'." if ok else "Failed to create user.")
+        elif kind == "change_access":
+            share, username, read_only = action["share"], action["username"], action["read_only"]
+            level = "read-only" if read_only else "read-write"
+            print(f"--- Changing '{username}''s access on '{share}' to {level} ---")
+            if self.wizard.has_admin_privileges():
+                ok = self.wizard.set_share_user_access(share, username, read_only)
+            else:
+                ok, output = self.wizard._elevated_relaunch_capturing(
+                    "--change-access", {"share": share, "username": username, "read_only": read_only}
+                )
+                print(output, end="")
+            print(f"'{username}' is now {level} on '{share}'." if ok else "Failed to change access level.")
         elif kind == "revoke_access":
             share, username = action["share"], action["username"]
             print(f"--- Revoking '{username}''s access to '{share}' ---")
@@ -817,7 +837,10 @@ class TUIWizard:
     def _manage_users(self, stdscr):
         users = []
         while True:
-            options = [f"{u['username']}  (select to remove)" for u in users] + ["+ Add User", "Done"]
+            options = [
+                f"{u['username']}{' (read-only)' if u.get('read_only') else ''}  (select to remove)"
+                for u in users
+            ] + ["+ Add User", "Done"]
             idx = self._menu(stdscr, "Users", options, subtitle=f"{len(users)} configured")
             if idx is None or idx == len(options) - 1:
                 return users
@@ -828,7 +851,12 @@ class TUIWizard:
                 password = self._text_input(stdscr, f"Password for {username}:", password=True)
                 if not password:
                     continue
-                users.append({"username": username, "password": password})
+                access_choice = self._menu(
+                    stdscr, f"Access level for {username}", ["Read-write", "Read-only"]
+                )
+                if access_choice is None:
+                    continue
+                users.append({"username": username, "password": password, "read_only": access_choice == 1})
             else:
                 del users[idx]
 
@@ -877,7 +905,10 @@ class TUIWizard:
                 (
                     s["name"],
                     [f"path: {s.get('path', 'Unknown')}"]
-                    + [f"user: {u['username']}" for u in s.get("users", [])],
+                    + [
+                        f"user: {u['username']}" + (" (read-only)" if u.get("read_only") else "")
+                        for u in s.get("users", [])
+                    ],
                 )
                 for s in shares
             ]
@@ -914,7 +945,15 @@ class TUIWizard:
                 password = self._text_input(stdscr, f"Password for {username}:", password=True)
                 if not password:
                     continue
-                action = {"action": "add_user", "share": share['name'], "username": username, "password": password}
+                access_choice = self._menu(
+                    stdscr, f"Access level for {username}", ["Read-write", "Read-only"]
+                )
+                if access_choice is None:
+                    continue
+                action = {
+                    "action": "add_user", "share": share['name'], "username": username, "password": password,
+                    "read_only": access_choice == 1,
+                }
 
             if self.wizard.elevation_needs_terminal():
                 return action
@@ -1019,6 +1058,7 @@ class TUIWizard:
             sub_options.append("Remove from group")
         if user["shares"]:
             sub_options.append("Revoke share access")
+            sub_options.append("Change Access Level")
             sub_options.append("Reset Password & Show QR")
         sub_options.append("Delete user")
         sub_idx = self._menu(
@@ -1029,7 +1069,36 @@ class TUIWizard:
             return None
         choice = sub_options[sub_idx]
 
-        if choice == "Reset Password & Show QR":
+        if choice == "Change Access Level":
+            if len(user["shares"]) == 1:
+                share_name = user["shares"][0]
+            else:
+                sidx = self._menu(stdscr, "Change access level for which share?", user["shares"])
+                if sidx is None:
+                    return None
+                share_name = user["shares"][sidx]
+            share = next((s for s in self.wizard.list_shares() if s["name"] == share_name), None)
+            share_user = next((u for u in (share or {}).get("users", []) if u["username"] == user["username"]), None)
+            current_read_only = share_user.get("read_only", False) if share_user else False
+            current_label = "read-only" if current_read_only else "read-write"
+            new_label = "read-write" if current_read_only else "read-only"
+            confirm = self._menu(
+                stdscr, f"'{user['username']}' is {current_label} on '{share_name}'. Change to {new_label}?",
+                ["Yes, change it", "Cancel"],
+            )
+            if confirm != 0:
+                return None
+            action = {"action": "change_access", "share": share_name, "username": user["username"],
+                      "read_only": not current_read_only}
+            if self.wizard.elevation_needs_terminal():
+                return action
+            self._run_privileged_action(
+                stdscr, f"Changing '{user['username']}''s access level on '{share_name}'...",
+                lambda: self._users_groups_action_in_curses(action)
+            )
+            return None
+
+        elif choice == "Reset Password & Show QR":
             # Same underlying operation "Add user" (on the share side)
             # performs when the user already exists - grant_share_access
             # resets the password rather than failing. See
@@ -1050,8 +1119,14 @@ class TUIWizard:
             )
             if not password:
                 return None
+            # Preserve the user's current access level on this share - a
+            # password reset shouldn't silently flip them back to read-write.
+            share = next((s for s in self.wizard.list_shares() if s["name"] == share_name), None)
+            share_user = next((u for u in (share or {}).get("users", []) if u["username"] == user["username"]), None)
+            read_only = share_user.get("read_only", False) if share_user else False
             action = {
-                "action": "add_user", "share": share_name, "username": user["username"], "password": password
+                "action": "add_user", "share": share_name, "username": user["username"], "password": password,
+                "read_only": read_only,
             }
             if self.wizard.elevation_needs_terminal():
                 return action

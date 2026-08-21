@@ -75,7 +75,8 @@ class CLIWizard(SMBWizard):
             username = self._pick_or_type_username()
             if not username: break
             password = getpass.getpass(f"   Password for {username}: ")
-            self.users.append({'username': username, 'password': password})
+            read_only = console.input(f"   Read-only access for {username}? [y/N] ").strip().lower() in ('y', 'yes')
+            self.users.append({'username': username, 'password': password, 'read_only': read_only})
 
         return True
 
@@ -87,7 +88,10 @@ class CLIWizard(SMBWizard):
 
         print("\n--- Existing Shares ---")
         for i, share in enumerate(shares):
-            users = ", ".join(u["username"] for u in share.get("users", [])) or "(none)"
+            users = ", ".join(
+                u["username"] + (" (read-only)" if u.get("read_only") else "")
+                for u in share.get("users", [])
+            ) or "(none)"
             print(f"{i}. {share['name']} ({share.get('path', 'Unknown')}) - users: {users}")
 
         choice = input("\nEnter share number to manage, or press Enter to return: ").strip()
@@ -111,7 +115,8 @@ class CLIWizard(SMBWizard):
                 console.print("[red]Username cannot be empty.[/red]")
                 return
             password = getpass.getpass(f"   Password for {username}: ")
-            if self.grant_share_access(share['name'], username, password):
+            read_only = input(f"   Read-only access for {username}? [y/N] ").strip().lower() in ('y', 'yes')
+            if self.grant_share_access(share['name'], username, password, read_only):
                 print(f"Added '{username}' to share '{share['name']}'.")
                 self._offer_qr_code(share['name'], username, password)
             else:
@@ -201,6 +206,7 @@ class CLIWizard(SMBWizard):
                 sub_options.append("Remove from group")
             if user["shares"]:
                 sub_options.append("Revoke share access")
+                sub_options.append("Change Access Level")
                 sub_options.append("Reset Password & Show QR")
             sub_options.append("Delete user")
             sub_options.append("Back")
@@ -259,6 +265,33 @@ class CLIWizard(SMBWizard):
                     print(f"Revoked '{user['username']}''s access to '{share_name}'.")
                 else:
                     print("Failed to revoke access (or elevation was cancelled).")
+            elif action == "Change Access Level":
+                if len(user["shares"]) == 1:
+                    share_name = user["shares"][0]
+                else:
+                    print("Shares:")
+                    for si, sname in enumerate(user["shares"]):
+                        print(f"  {si}. {sname}")
+                    sidx = input("Change access level for which share number? ").strip()
+                    if not sidx.isdigit() or not (0 <= int(sidx) < len(user["shares"])):
+                        print("Invalid share number.")
+                        continue
+                    share_name = user["shares"][int(sidx)]
+                share = next((s for s in self.list_shares() if s["name"] == share_name), None)
+                share_user = next((u for u in (share or {}).get("users", []) if u["username"] == user['username']), None)
+                current_read_only = share_user.get("read_only", False) if share_user else False
+                current_label = "read-only" if current_read_only else "read-write"
+                new_label = "read-write" if current_read_only else "read-only"
+                confirm = input(
+                    f"'{user['username']}' is currently {current_label} on '{share_name}'. "
+                    f"Change to {new_label}? [y/N] "
+                ).strip().lower()
+                if confirm not in ('y', 'yes'):
+                    continue
+                if self.change_share_access(share_name, user['username'], not current_read_only):
+                    print(f"'{user['username']}' is now {new_label} on '{share_name}'.")
+                else:
+                    print("Failed to change access level (or elevation was cancelled).")
             elif action == "Reset Password & Show QR":
                 # Same underlying operation "Add user" performs when the
                 # user already exists - grant_share_access resets the
@@ -281,7 +314,13 @@ class CLIWizard(SMBWizard):
                 if not password:
                     console.print("[red]Password cannot be empty.[/red]")
                     continue
-                if self.grant_share_access(share_name, user['username'], password):
+                # Preserve the user's current access level on this share -
+                # a password reset shouldn't silently flip them back to
+                # read-write.
+                share = next((s for s in self.list_shares() if s["name"] == share_name), None)
+                share_user = next((u for u in (share or {}).get("users", []) if u["username"] == user['username']), None)
+                read_only = share_user.get("read_only", False) if share_user else False
+                if self.grant_share_access(share_name, user['username'], password, read_only):
                     print(f"Reset '{user['username']}''s password on share '{share_name}'.")
                     self._offer_qr_code(share_name, user['username'], password)
                 else:
