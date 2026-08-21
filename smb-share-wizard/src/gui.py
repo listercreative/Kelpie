@@ -976,7 +976,7 @@ class GUIWizard:
             return
         name = self.shares_list.item(selection[0], "values")[0]
         if not messagebox.askyesno(
-            "Remove share", f"Remove share '{name}'? This updates the live Samba configuration."
+            "Remove share", f"Remove share '{name}'? This updates the live share configuration."
         ):
             return
         delete_folder = False
