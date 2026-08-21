@@ -122,9 +122,9 @@ class TUIWizard:
                 input("\nPress Enter to return to the menu...")
                 continue
 
-            delete_name = result.get("delete_share")
-            if delete_name:
-                self._delete_outside_curses(delete_name)
+            delete_action = result.get("delete_share")
+            if delete_action:
+                self._delete_outside_curses(delete_action["name"], delete_action.get("delete_folder", False))
                 input("\nPress Enter to return to the menu...")
                 continue
 
@@ -201,10 +201,10 @@ class TUIWizard:
             for user in share_data["users"]:
                 self._offer_qr_code_plain(share_data["name"], user["username"], user["password"])
 
-    def _delete_outside_curses(self, name):
+    def _delete_outside_curses(self, name, delete_folder=False):
         print(f"\n--- Removing share '{name}' ---")
-        if self.wizard.remove_share(name):
-            print(f"Removed share: {name}")
+        if self.wizard.remove_share(name, delete_folder):
+            print(f"Removed share: {name}" + (" (folder deleted too)" if delete_folder else ""))
         else:
             print("Failed to remove share (or elevation was cancelled).")
 
@@ -331,14 +331,16 @@ class TUIWizard:
             _, output = self.wizard._elevated_relaunch_capturing("--apply", share_data)
             print(output, end="")
 
-    def _delete_in_curses(self, name):
+    def _delete_in_curses(self, name, delete_folder=False):
         print(f"--- Removing share '{name}' ---")
         if self.wizard.has_admin_privileges():
-            ok = self.wizard.delete_share(name)
+            ok = self.wizard.delete_share(name, delete_folder)
         else:
-            ok, output = self.wizard._elevated_relaunch_capturing("--delete-share", {"name": name})
+            ok, output = self.wizard._elevated_relaunch_capturing(
+                "--delete-share", {"name": name, "delete_folder": delete_folder}
+            )
             print(output, end="")
-        print(f"Removed share: {name}" if ok else "Failed to remove share.")
+        print(("Removed share: " + name + (" (folder deleted too)" if delete_folder else "")) if ok else "Failed to remove share.")
 
     def _add_user_in_curses(self, action):
         share, username, password = action["share"], action["username"], action["password"]
@@ -499,7 +501,7 @@ class TUIWizard:
                 action = self._manage_shares_flow(stdscr)
                 if action:
                     if action["action"] == "delete":
-                        result["delete_share"] = action["name"]
+                        result["delete_share"] = action
                     elif action["action"] == "add_user":
                         result["add_user"] = action
                     return
@@ -891,7 +893,20 @@ class TUIWizard:
             choice = sub_options[sub_idx]
 
             if choice == "Delete share":
-                action = {"action": "delete", "name": share['name']}
+                confirm = self._menu(stdscr, f"Delete share '{share['name']}'?", ["Yes, delete", "Cancel"])
+                if confirm != 0:
+                    continue
+                delete_folder = False
+                if share.get('path'):
+                    folder_choice = self._menu(
+                        stdscr, "Also permanently delete the folder and everything in it?",
+                        ["No, keep the folder", "Yes, delete the folder too"],
+                        subtitle=share['path'], body=["This cannot be undone."],
+                    )
+                    if folder_choice is None:
+                        continue
+                    delete_folder = folder_choice == 1
+                action = {"action": "delete", "name": share['name'], "delete_folder": delete_folder}
             else:
                 username = self._pick_or_type_username(stdscr)
                 if not username:
@@ -907,7 +922,7 @@ class TUIWizard:
             if action["action"] == "delete":
                 self._run_privileged_action(
                     stdscr, f"Removing share '{action['name']}'...",
-                    lambda: self._delete_in_curses(action["name"])
+                    lambda: self._delete_in_curses(action["name"], action.get("delete_folder", False))
                 )
             else:
                 self._run_privileged_action(

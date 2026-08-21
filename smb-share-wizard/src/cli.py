@@ -117,8 +117,18 @@ class CLIWizard(SMBWizard):
             else:
                 print("Failed to add user (or elevation was cancelled).")
         elif sub == '2':
-            if self.remove_share(share['name']):
-                print(f"Removed share: {share['name']}")
+            confirm = input(f"Delete share '{share['name']}'? [y/N] ").strip().lower()
+            if confirm not in ('y', 'yes'):
+                return
+            delete_folder = False
+            if share.get('path'):
+                also_delete = input(
+                    f"Also permanently delete the folder and everything in it - "
+                    f"'{share['path']}'? This cannot be undone. [y/N] "
+                ).strip().lower()
+                delete_folder = also_delete in ('y', 'yes')
+            if self.remove_share(share['name'], delete_folder):
+                print(f"Removed share: {share['name']}" + (" (folder deleted too)" if delete_folder else ""))
             else:
                 print("Failed to remove share (or elevation was cancelled).")
 

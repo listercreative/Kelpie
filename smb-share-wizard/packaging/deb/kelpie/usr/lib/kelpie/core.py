@@ -95,21 +95,55 @@ class SMBWizard:
             return self._list_shares_windows()
         return []
 
-    def delete_share(self, name):
+    def delete_share(self, name, delete_folder=False):
         # Requires root. Callers not already elevated should go through
-        # remove_share() instead, which handles that.
-        if self.system == "Linux":
-            return self._delete_share_linux(name)
-        elif self.system == "Darwin":
-            return self._delete_share_macos(name)
-        elif self.system == "Windows":
-            return self._delete_share_windows(name)
-        return False
+        # remove_share() instead, which handles that. Removing the share
+        # definition never touched the underlying folder/data on its own -
+        # delete_folder opts into also deleting it, captured before the
+        # share definition (and its recorded path) is gone.
+        share_path = None
+        if delete_folder:
+            share = next((s for s in self.list_shares() if s["name"] == name), None)
+            share_path = share.get("path") if share else None
 
-    def remove_share(self, name):
+        if self.system == "Linux":
+            ok = self._delete_share_linux(name)
+        elif self.system == "Darwin":
+            ok = self._delete_share_macos(name)
+        elif self.system == "Windows":
+            ok = self._delete_share_windows(name)
+        else:
+            return False
+
+        if ok and delete_folder and share_path:
+            self._delete_share_folder(share_path)
+        return ok
+
+    def _delete_share_folder(self, path):
+        # Same unsafe-path guard used before ever creating a share -
+        # defense in depth before an rm -rf-equivalent, even though this
+        # path came from Kelpie's own live share listing rather than fresh
+        # user input. This project exists because of a past incident where
+        # a permission/path mistake wiped out the wrong directory - a
+        # recursive delete gets no less scrutiny than share creation did.
+        ok, message = self.check_share_path(path)
+        if not ok:
+            print(f"Refusing to delete folder: {message}")
+            return
+        resolved = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isdir(resolved):
+            print(f"Folder '{resolved}' doesn't exist - nothing to delete.")
+            return
+        try:
+            shutil.rmtree(resolved)
+            print(f"Deleted folder and its contents: {resolved}")
+        except Exception as e:
+            print(f"Failed to delete folder '{resolved}': {e}")
+
+    def remove_share(self, name, delete_folder=False):
         if self.has_admin_privileges():
-            return self.delete_share(name)
-        return self.elevate_and_delete(name)
+            return self.delete_share(name, delete_folder)
+        return self.elevate_and_delete(name, delete_folder)
 
     def create_user(self, username, password):
         # Requires root/admin. Creates (or resets the password of) a
@@ -564,8 +598,8 @@ class SMBWizard:
     def elevate_and_apply(self, share_data):
         return self._elevated_relaunch("--apply", share_data)
 
-    def elevate_and_delete(self, name):
-        return self._elevated_relaunch("--delete-share", {"name": name})
+    def elevate_and_delete(self, name, delete_folder=False):
+        return self._elevated_relaunch("--delete-share", {"name": name, "delete_folder": delete_folder})
 
     def elevate_and_grant_access(self, share_name, username, password):
         return self._elevated_relaunch(
@@ -621,7 +655,7 @@ class SMBWizard:
 
         wizard = SMBWizard()
         wizard._invoking_user_override = data.get('_invoking_user')
-        wizard.delete_share(data['name'])
+        wizard.delete_share(data['name'], data.get('delete_folder', False))
 
     @staticmethod
     def create_user_from_file(path):

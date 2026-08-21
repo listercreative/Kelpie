@@ -802,23 +802,34 @@ class GUIWizard:
             "Remove share", f"Remove share '{name}'? This updates the live Samba configuration."
         ):
             return
-        threading.Thread(target=self._delete_worker, args=(name,), daemon=True).start()
+        delete_folder = False
+        share = next((s for s in self.wizard.list_shares() if s["name"] == name), None)
+        path = share.get("path") if share else None
+        if path:
+            delete_folder = messagebox.askyesno(
+                "Delete folder too?",
+                f"Also permanently delete the folder and everything in it?\n\n{path}\n\n"
+                "This cannot be undone.",
+            )
+        threading.Thread(target=self._delete_worker, args=(name, delete_folder), daemon=True).start()
 
-    def _delete_worker(self, name):
+    def _delete_worker(self, name, delete_folder=False):
         buffer = io.StringIO()
         removed = False
         try:
             with contextlib.redirect_stdout(buffer):
-                removed = self.wizard.remove_share(name)
+                removed = self.wizard.remove_share(name, delete_folder)
         except Exception as e:
             buffer.write(f"\nUnexpected error: {e}\n")
-        self.root.after(0, lambda: self._delete_done(name, removed, buffer.getvalue()))
+        self.root.after(0, lambda: self._delete_done(name, removed, delete_folder, buffer.getvalue()))
 
-    def _delete_done(self, name, removed, log_output):
+    def _delete_done(self, name, removed, delete_folder, log_output):
         if log_output.strip():
             self._append_log(log_output)
         if removed:
-            messagebox.showinfo("Removed", f"Removed share: {name}")
+            messagebox.showinfo(
+                "Removed", f"Removed share: {name}" + (" (folder deleted too)" if delete_folder else "")
+            )
         else:
             messagebox.showerror("Failed", f"Could not remove share '{name}' — see log.")
         self._refresh_all_lists()
