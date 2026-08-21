@@ -1006,7 +1006,21 @@ Remove-Item $cfgPath,$dbPath -ErrorAction SilentlyContinue
             self._ensure_windows_firewall_and_network()
 
             print(f"  - Creating share '{self.share_name}' with FullAccess for '{group_name}'...")
-            cmd = f"New-SmbShare -Name '{self._ps_quote(self.share_name)}' -Path '{self._ps_quote(self.share_path)}' -FullAccess '{self._ps_quote(group_name)}' -ErrorAction SilentlyContinue"
+            escaped_share = self._ps_quote(self.share_name)
+            escaped_path = self._ps_quote(self.share_path)
+            escaped_group = self._ps_quote(group_name)
+            # Idempotent, not silenced: -ErrorAction SilentlyContinue on a
+            # bare New-SmbShare both hid the real error on any genuine
+            # failure (empty stderr - no diagnostic to go on) and wasn't
+            # actually idempotent - if a share by this name already existed
+            # (e.g. a stale one left over from earlier testing), it did
+            # nothing at all, never granting the new group access.
+            cmd = (
+                f"if (-not (Get-SmbShare -Name '{escaped_share}' -ErrorAction SilentlyContinue)) {{ "
+                f"New-SmbShare -Name '{escaped_share}' -Path '{escaped_path}' -FullAccess '{escaped_group}' "
+                f"}} else {{ Grant-SmbShareAccess -Name '{escaped_share}' -AccountName '{escaped_group}' "
+                f"-AccessRight Full -Force }}"
+            )
             _run(["powershell", "-Command", cmd], check=True, capture_output=True, text=True)
 
             print("[Windows] Success.")

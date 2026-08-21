@@ -173,7 +173,15 @@ class GUIWizard:
         # icon (set below) looks right.
         self.root = tk.Tk(className="Kelpie")
         self.root.title("Kelpie")
-        self.root.geometry("560x600")
+        # Tk has no built-in "center on screen" - left alone, the window
+        # manager decides placement, which is commonly the top-left corner
+        # rather than anywhere near the middle of the display.
+        width, height = 560, 600
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
         self._load_icon_image()
         self._set_window_icon()
         self._build_header()
