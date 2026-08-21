@@ -39,6 +39,44 @@ then installs `kelpie` + `samba` via `apt`. It also removes and cleanly
 reinstalls automatically if Kelpie is already present, so re-running it
 against a newer tarball works as an update path.
 
+Either of these requires a terminal - most Linux file managers don't
+execute shell scripts on double-click by default, and even where one
+does, it typically runs with no visible terminal attached, which
+`install.sh` needs (it checks for a real tty to decide whether to show
+the curses preview, and its plain-text fallback still needs to *read*
+your y/N answer). There's no reliable double-click path for either the
+tarball or `install.sh` itself.
+
+## One-line install (curl | sh)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/listercreative/Kelpie/main/smb-share-wizard/packaging/deb/bootstrap.sh | sh
+```
+
+`bootstrap.sh` clones the repo, builds the `.deb` from current source, and
+runs `install.sh` - same preview/confirmation step as above, this only
+automates *fetching* the files. It explicitly redirects `install.sh` to
+`/dev/tty` rather than inherited stdin/stdout, since a `curl | sh`
+invocation's own stdin is the piped script source, not the terminal - the
+same reason `postinst` does the same redirect for Kelpie's first-run
+launch after install.
+
+## Double-click alternative (no terminal)
+
+Unlike shell scripts, a bare `.deb` file *is* something most desktop
+Linux file managers hand off to a graphical package installer (GNOME
+Software, KDE Discover, gdebi) on double-click. But offering the bare
+`.deb` on its own means bypassing `install.sh` entirely - which means
+losing the fix for the very first bug this project hit: modern Ubuntu
+(22.04+) defaults new users' home directories to `750`, and `apt`'s
+download sandbox (the unprivileged `_apt` user) can't read a file sitting
+inside one - `install.sh` works around this by staging the `.deb` in
+`/tmp` first. A GUI installer launched by double-clicking the file
+straight out of `~/Downloads` has no such workaround, and can hit that
+exact same "Permission denied" failure on a lot of real, default-config
+Ubuntu systems. Not recommended as a primary path without that caveat
+being clearly stated wherever it's offered.
+
 ## Releasing an update
 
 **Bump the version before rebuilding**, in two places:
@@ -69,5 +107,6 @@ file under the old name).
 | `build.sh` | Rebuilds `kelpie_0.1.0_all.deb` from `../../src/*.py` |
 | `dist.sh` | Runs `build.sh`, then bundles the distributable tarball |
 | `install.sh` | What end users run — preview, confirm, `apt install` |
+| `bootstrap.sh` | `curl \| sh` one-liner: clones the repo, builds, runs `install.sh` |
 | `preview.py` | The pre-install curses preview screen (self-contained, no imports from `src/`, so the tarball needs only these files) |
 | `kelpie/` | The `.deb`'s staged file tree (`DEBIAN/control`, `postinst`, etc.) |
