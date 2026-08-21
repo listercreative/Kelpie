@@ -35,12 +35,27 @@ $RepoSrc = Resolve-Path (Join-Path $PSScriptRoot "..\..\src")
 python -m pip install --upgrade pip
 python -m pip install pyinstaller rich "qrcode[pil]"
 
+# Verify the exact same Python that ran pip above can actually import
+# everything Kelpie needs bundled, before PyInstaller ever runs. Windows
+# commonly has more than one Python on PATH (python.org install, Microsoft
+# Store stub, Anaconda, ...) - "pip install X" and the bare "pyinstaller"
+# command can silently resolve to two different interpreters, so X being
+# installed doesn't guarantee PyInstaller's scan will ever see it. This
+# turns that class of bug into a loud build failure instead of a
+# ModuleNotFoundError inside the shipped .exe.
+python -c "import PyInstaller, rich, qrcode, PIL"
+Assert-LastExitCode "Dependency check (pip install and PyInstaller may be seeing different Pythons - check 'where.exe python')"
+
+# Invoked as "python -m PyInstaller", not the bare "pyinstaller" command -
+# guarantees this runs under the exact interpreter just verified above,
+# rather than whatever "pyinstaller" happens to resolve to on PATH.
+#
 # --collect-all=PIL: Pillow registers its image codecs (PNG included) by
 # dynamically scanning and importing its own package at runtime
 # (PIL.Image.init()) - invisible to PyInstaller's static import analysis,
 # so without this the QR feature's PNG save silently fails and leaves a
 # blank dialog on screen instead of a visible error.
-pyinstaller `
+python -m PyInstaller `
   --onefile `
   --windowed `
   --uac-admin `
