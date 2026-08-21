@@ -70,12 +70,18 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <ui:WixUI Id="WixUI_InstallDir" />
 
-    <!-- "Launch Kelpie" checkbox on the final install page, checked by
-         default (WixUI's exit dialog checks it unless told otherwise).
+    <!-- "Launch Kelpie" checkbox on the final install page. The checkbox's
+         checked-state is its own property, separate from its label text -
+         setting only the text left it unchecked by default (an MSI
+         property with no explicit value starts unset/false), so nothing
+         launched unless a user happened to tick a box that wasn't obviously
+         asking to be ticked. Pre-set to checked so launching is the default,
+         opt-out behavior most installers use.
          WixShellExec (from the Util extension) is the standard way to run
          an arbitrary file from a custom action; Impersonate="yes" runs it
          as the logged-in user rather than as the elevated installer. -->
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Kelpie" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
     <Property Id="WixShellExecTarget" Value="[#KelpieExe]" />
     <CustomAction Id="LaunchApplication" BinaryRef="Wix4UtilCA_X64" DllEntry="WixShellExec" Impersonate="yes" />
     <UI>
