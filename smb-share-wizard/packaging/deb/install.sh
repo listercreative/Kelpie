@@ -73,7 +73,11 @@ fi
 if dpkg -s kelpie >/dev/null 2>&1; then
     echo
     echo "Kelpie is already installed - removing it first for a clean reinstall..."
-    sudo apt-get remove -y kelpie
+    # KELPIE_REINSTALLING tells prerm this is install.sh's own
+    # reinstall/upgrade cycle, not a real uninstall - without it, every
+    # routine update would ask "delete your share folders?", which nobody
+    # wants. `sudo VAR=value cmd` passes it through even with env_reset.
+    sudo KELPIE_REINSTALLING=1 apt-get remove -y kelpie
     # apt won't remove this directory itself if anything untracked (like
     # Python's __pycache__) got left in it after install - clear it so the
     # reinstall below starts from nothing rather than picking up stale files.

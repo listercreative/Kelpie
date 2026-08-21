@@ -17,7 +17,7 @@ cp "$PROJECT_ROOT/assets/kelpie_icon.png" "$PKG/usr/share/pixmaps/kelpie.png"
 
 find "$PKG" -type d -exec chmod 755 {} \;
 chmod 644 "$PKGLIB"/*.py "$PKGLIB/kelpie_icon.png"
-chmod 755 "$PKG/DEBIAN/postinst" "$PKG/usr/bin/kelpie"
+chmod 755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/prerm" "$PKG/usr/bin/kelpie"
 chmod 644 "$PKG/DEBIAN/control" \
           "$PKG/usr/share/applications/kelpie.desktop" \
           "$PKG/usr/share/doc/kelpie/copyright" \
